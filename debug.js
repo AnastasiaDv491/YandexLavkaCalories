@@ -7,6 +7,7 @@
 // @match        https://lavka.yandex.ru/*
 // @match        https://yandex.ru/lavka/*
 // @grant        none
+// @noframes
 // @run-at       document-idle
 // ==/UserScript==
 

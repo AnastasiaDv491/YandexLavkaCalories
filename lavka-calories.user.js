@@ -7,8 +7,9 @@
 // @match        https://lavka.yandex.ru/*
 // @match        https://yandex.ru/lavka/*
 // @grant        GM_xmlhttpRequest
-// @connect        world.openfoodfacts.org
-// @connect        ru.openfoodfacts.org
+// @connect      world.openfoodfacts.org
+// @connect      ru.openfoodfacts.org
+// @noframes
 // @run-at       document-idle
 // ==/UserScript==
 
