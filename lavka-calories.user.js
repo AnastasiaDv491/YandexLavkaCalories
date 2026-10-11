@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.2.0 (MVP)
+// @version      0.3.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
-// @match        https://lavka.yandex.ru/*
-// @match        https://yandex.ru/lavka/*
+// @match        *://lavka.yandex.ru/*
+// @match        *://yandex.ru/lavka/*
+// @include      /^https?:\/\/.*yandex\.(ru|net)\/.*$/
 // @grant        GM_xmlhttpRequest
 // @connect      world.openfoodfacts.org
 // @connect      ru.openfoodfacts.org
-// @noframes
 // @run-at       document-idle
 // ==/UserScript==
 
