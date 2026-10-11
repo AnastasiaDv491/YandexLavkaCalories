@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Лавка — Диагностика v3 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.7.0
+// @version      0.8.0
 // @description  Кнопка «Диагностика»: сканирует ТУТ ЖЕ документ (и shadow DOM) на наличие товаров корзины; работает во всех фреймах и iframe Лавки
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -86,11 +86,22 @@
   // признаками карточки (изображение + текст с ₽ рядом).
   function collectCardCandidates(doc) {
     const out = [];
-    // 0) карточки Лавки по классам + alt картинок (основной путь userscript v0.5)
+    // 0) карточки Лавки по классам + alt картинок (основной путь userscript v0.6):
+    //    берём только ЛИСТОВЫЕ карточки — без вложенных таких же, чтобы секция-обёртка
+    //    ProductCard не «съедала» позиции корзины
     deepAllElements(doc).forEach((el) => {
-      if (out.length >= 12) return;
+      if (out.length >= 30) return;
       const cls = el.className && el.className.toString ? el.className.toString() : '';
       if (!/ProductListItem|ProductCard|ProductSnippet/.test(cls)) return;
+      let nested = false;
+      try {
+        const inner = el.querySelectorAll('[class*="ProductListItem"], [class*="ProductCard"], [class*="ProductSnippet"]');
+        for (const c of inner) {
+          const ccls = c.className && c.className.toString ? c.className.toString() : '';
+          if (/ProductListItem|ProductCard|ProductSnippet/.test(ccls)) { nested = true; break; }
+        }
+      } catch (e) { /* ignore */ }
+      if (nested) return;
       const alts = [];
       el.querySelectorAll('img[alt]').forEach((im) => {
         const a = (im.alt || '').replace(/\u00ad/g, '').replace(/<notr>/gi, ' ').replace(/\s+/g, ' ').trim();

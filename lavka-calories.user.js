@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.5.0 (MVP)
+// @version      0.6.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -232,21 +232,63 @@
   // или ProductCard/ProductSnippet (карточки товаров). Названия берем из alt картинок.
   const CARD_SELECTOR = '[class*="ProductListItem"], [class*="ProductCard"], [class*="ProductSnippet"]';
 
+  // Все элементы deep-обхода (включая shadow DOM), чтобы querySelector работал по ним
+  function deepAllElements(root, acc) {
+    acc = acc || [];
+    try {
+      root.querySelectorAll('*').forEach((el) => {
+        acc.push(el);
+        if (el.shadowRoot) deepAllElements(el.shadowRoot, acc);
+      });
+    } catch (e) { /* ignore */ }
+    return acc;
+  }
+
+  // Карточка — это элемент с подходящим классом, НЕ содержащий другую такую же карточку
+  // (иначе ProductListItem внутри Section.ProductCard съел бы все позиции корзины).
+  function isLeafCard(el) {
+    const cls = (typeof el.className === 'string') ? el.className : '';
+    if (!/ProductListItem|ProductCard|ProductSnippet/.test(cls)) return false;
+    let nested = false;
+    try {
+      const inner = el.querySelectorAll('[class*="ProductListItem"], [class*="ProductCard"], [class*="ProductSnippet"]');
+      for (const c of inner) {
+        const ccls = (typeof c.className === 'string') ? c.className : '';
+        if (/ProductListItem|ProductCard|ProductSnippet/.test(ccls)) { nested = true; break; }
+      }
+    } catch (e) { /* ignore */ }
+    return !nested;
+  }
+
   function collectCardItems(root) {
-    const cartRoot = findCartSection(root);   // ограничиваемся блоком «Состав», если найден
-    const cards = deepQueryAll(cartRoot, CARD_SELECTOR);
-    const items = [];
+    // Листовые карточки ищем во всём документе: блок «Состав» может быть секцией-обёрткой,
+    // а может и не находиться вовсе — фолбэк лучше, чем пустой результат.
+    const cards = deepAllElements(document).filter(isLeafCard);
+    let items = [];
     for (const card of cards) {
       if (isInExcludedBlock(card)) continue;  // «похожие товары» и т.п. — не позиции корзины
       const name = itemNameFromCard(card);
       if (!isPlausibleName(name)) continue;
       items.push(itemFromNode(card, name));
     }
-    return dedupeByElement(items);
+    items = dedupeByElement(items);
+
+    // Скоупинг: если найден блок «Состав» и в нём есть хотя бы одна из карточек,
+    // оставляем только карточки из этого блока (исключаем промо «предложили купить»).
+    const cartRoot = findCartSection(root);
+    if (cartRoot !== root && items.length > 0) {
+      const scoped = items.filter((it) => {
+        try { return cartRoot.contains(it.el); } catch (e) { return true; }
+      });
+      if (scoped.length > 0) items = scoped;
+    }
+    return items;
   }
 
   // Блок с позициями корзины: в Лавке он озаглавлен «Состав». Ищем заголовок
-  // с точным текстом «Состав» и поднимаемся до разумного контейнера (~150-600px).
+  // с точным текстом «Состав», поднимаемся до его секции-контейнера и берём
+  // ВСЕ карточки из неё. Если ничего не нашлось — фолбэк на весь документ
+  // (лучше показать лишние промо-карточки, чем ничего).
   function findCartSection(root) {
     const heads = deepQueryAll(root, 'h1, h2, h3, h4, span, div');
     for (const h of heads) {
@@ -258,13 +300,14 @@
         if ((c.textContent || '').trim().length > 3) { childText = true; break; }
       }
       if (childText) continue;
+      // поднимаемся до предка, внутри которого есть карточка товара
       let el = h;
-      for (let i = 0; i < 8 && el.parentElement; i++) {
+      for (let i = 0; i < 10 && el.parentElement; i++) {
         el = el.parentElement;
-        const r = el.getBoundingClientRect();
-        if (r.height >= 150 && r.height <= 600) return el;
+        try {
+          if (el.querySelector(CARD_SELECTOR)) return el;
+        } catch (e) { /* ignore */ }
       }
-      return h.parentElement || root;
     }
     return root; // фолбэк: вся страница/фрейм
   }
