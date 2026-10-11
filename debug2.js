@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Лавка — Диагностика v3 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      1.2.0
+// @version      1.3.0
 // @description  Кнопка «Диагностика»: сканирует ТУТ ЖЕ документ (и shadow DOM) на наличие товаров корзины; работает во всех фреймах и iframe Лавки
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -99,10 +99,13 @@
   // признаками карточки (изображение + текст с ₽ рядом).
   function collectCardCandidates(doc) {
     const out = [];
-    // 0) позиции корзины Лавки (userscript v0.9): прямой селектор по data-testid/class
+    // 0) позиции корзины Лавки (userscript v0.12): прямой селектор по data-testid/class.
+    // ВАЖНО: limit должен быть больше лимита остальных кандидатов, иначе квота
+    // «30 элементов» тратится на мусор из card-like и реальные позиции не попадают в JSON.
     const CART_ITEM_SELECTOR = '[data-testid^="cart_item_"], [class*="ProductListItem"]';
+    const CART_LIMIT = 80;
     deepAllElements(doc).forEach((el) => {
-      if (out.length >= 30) return;
+      if (out.length >= CART_LIMIT) return;
       let isCard = false;
       try { isCard = el.matches && el.matches(CART_ITEM_SELECTOR); } catch (e) { /* ignore */ }
       if (!isCard) return;
@@ -128,7 +131,7 @@
     });
     // 1) любые ссылки, похожие на товарные
     deepAllElements(doc).forEach((el) => {
-      if (out.length >= 25) return;
+      if (out.length >= CART_LIMIT + 10) return;
       const tag = el.tagName ? el.tagName.toLowerCase() : '';
       if (tag === 'a' || tag === 'area') {
         const href = el.getAttribute('href') || '';
@@ -141,7 +144,7 @@
     //    а в родителе есть картинка и цена — типичная карточка
     const allText = deepAllElements(doc);
     for (const el of allText) {
-      if (out.length >= 30) break;
+      if (out.length >= CART_LIMIT + 25) break;
       const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
       if (txt.length < 4 || txt.length > 70) continue;
       if (!/[а-яё]/i.test(txt)) continue;

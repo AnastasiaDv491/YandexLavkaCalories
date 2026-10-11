@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.11.0 (MVP)
+// @version      0.12.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -344,6 +344,10 @@
       // 2) фолбэк: все ProductListItem, но затем скоупинг блоком «Состав»,
       // чтобы не захватить промо-лист из той же секции.
       nodes = deepQueryAll(root, '[class*="ProductListItem"]');
+    } else if (deepQueryAll(root, '[class*="ProductListItem"]').length > nodes.length) {
+      // Диагностика расхождения: если ProductListItem больше, чем cart_item_,
+      // значит корзина рендерится без testid (A/B или кэш). Пишем в консоль.
+      try { console.warn('[lavka-kcal] cart_item_ найдено:', nodes.length, ', ProductListItem:', deepQueryAll(root, '[class*="ProductListItem"]').length); } catch (e) {}
     }
     for (const card of nodes) {
       if (isInExcludedBlock(card)) continue;  // «похожие товары» и т.п. — не позиции корзины
