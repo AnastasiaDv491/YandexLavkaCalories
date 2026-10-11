@@ -1,25 +1,22 @@
 // ==UserScript==
-// @name         Лавка — Диагностика v2 (временно)
+// @name         Лавка — Диагностика v3 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.3.0
-// @description  Собирает карту фреймов, data-qa/data-auto атрибуты и ссылки на товары (включая iframe/shadow DOM)
+// @version      0.4.0
+// @description  Кнопка «Диагностика»: сканирует ТУТ ЖЕ документ (и shadow DOM) на наличие товаров корзины; работает во всех фреймах
 // @author       AnastasiaDv491
 // @match        https://lavka.yandex.ru/*
 // @match        https://yandex.ru/lavka/*
 // @match        https://*/*
 // @grant        GM_info
-// @noframes
 // @run-at       document-idle
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  // Работаем ТОЛЬКО на lavka/yandex (верхний фрейм). Вложенные iframe пропускаем:
-  // для них этот же скрипт запустится отдельно благодаря @match https://*/* + @noframes?
-  // Нет: @noframes отключает запуск в iframe. Поэтому сам заходим во фреймы через contentWindow.
-  const onLavka = /lavka\.yandex\.ru|^https:\/\/yandex\.ru\/lavka/.test(location.href);
-  if (!onLavka) return;
+  // Скрипт запускается и в верхнем окне, и внутри каждого iframe (без @noframes),
+  // поэтому каждое окно сканирует САМО СЕБЯ — так мы точно увидим, где живёт корзина.
+  const isLavkaFrame = /lavka\.yandex\.ru|yandex\.ru\/lavka|yandex\.(net|ru)/.test(location.href);
 
   function collectAttrs(doc) {
     const attrs = {};
@@ -71,55 +68,58 @@
   }
 
   function report() {
-    const frames = [];
-    // верхний документ
-    frames.push({ url: location.href, sameOrigin: true, attrKeys: Object.keys(collectAttrs(document)).length, attrs: collectAttrs(document), productLinks: collectProductLinks(document) });
-
-    // все iframe на странице
-    document.querySelectorAll('iframe').forEach((f, i) => {
-      const info = { index: i, src: (f.src || '').slice(0, 150), accessible: false };
-      try {
-        const d = f.contentDocument;
-        if (d && d.documentElement) {
-          info.accessible = true;
-          info.innerUrl = d.location.href.slice(0, 150);
-          const attrs = collectAttrs(d);
-          info.attrKeys = Object.keys(attrs).length;
-          info.attrs = attrs;
-          info.productLinks = collectProductLinks(d);
-          info.bodyTextSample = (d.body ? d.body.textContent : '').replace(/\s+/g, ' ').slice(0, 300);
-        }
-      } catch (e) {
-        info.error = String(e).slice(0, 120);
-      }
-      frames.push(info);
-    });
-
-    const result = { topUrl: location.href, frameCount: frames.length - 1, frames };
-    console.log('[lavka-kcal-debug2]', JSON.stringify(result, null, 2));
+    // Сканируем ТОЛЬКО собственный документ (включая shadow DOM) — скрипт сам
+    // запустится отдельно в каждом iframe, где ему позволено.
+    const attrs = collectAttrs(document);
+    const result = {
+      frameUrl: location.href,
+      isLavkaFrame,
+      title: document.title.slice(0, 80),
+      attrKeys: Object.keys(attrs).length,
+      attrs,
+      productLinks: collectProductLinks(document),
+      basketTextHits: (() => {
+        // ищем текстовые маркеры корзины, чтобы понять, в этом ли окне она отрендерена
+        const t = (document.body && document.body.textContent) || '';
+        return ['Корзина', 'Итого', 'Оформить заказ', 'ккал', 'шт'].map((w) => ({ word: w, found: t.includes(w) }));
+      })(),
+      bodyTextSample: ((document.body && document.body.textContent) || '').replace(/\s+/g, ' ').trim().slice(0, 400),
+    };
+    console.log('[lavka-kcal-debug3]', JSON.stringify(result, null, 2));
 
     let box = document.getElementById('lavka-kcal-debug-box');
     if (!box) {
       box = document.createElement('pre');
       box.id = 'lavka-kcal-debug-box';
       Object.assign(box.style, {
-        position: 'fixed', bottom: '10px', left: '10px', zIndex: 999999,
+        position: 'fixed', bottom: '10px', left: '10px', zIndex: 2147483647,
         maxWidth: '700px', maxHeight: '60vh', overflow: 'auto',
         background: '#111', color: '#0f0', padding: '12px',
-        font: '12px monospace', borderRadius: '8px',
+        font: '12px monospace', borderRadius: '8px', display: 'none',
       });
       document.body.appendChild(box);
     }
     box.textContent = JSON.stringify(result, null, 2);
 
-    // кнопка копирования в буфер
-    const btn = document.createElement('button');
-    btn.textContent = 'Скопировать JSON';
-    Object.assign(btn.style, { position: 'fixed', bottom: '10px', right: '10px', zIndex: 999999, padding: '8px 12px' });
-    btn.onclick = () => navigator.clipboard.writeText(JSON.stringify(result, null, 2)).then(() => { btn.textContent = 'Скопировано!'; });
-    document.body.appendChild(btn);
+    // Кнопка всегда видна в ЛЮБОМ окне/фрейме: по ней видно, где скрипт запустился,
+    // а клик показывает диагностику именно этого документа.
+    const btn = document.getElementById('lavka-kcal-debug-btn') || document.createElement('button');
+    btn.id = 'lavka-kcal-debug-btn';
+    btn.textContent = '🔎 Диагностика ккал (' + (isLavkaFrame ? 'лавка' : 'др.фрейм') + ')';
+    Object.assign(btn.style, {
+      position: 'fixed', top: '10px', right: '10px', zIndex: 2147483647,
+      padding: '8px 12px', background: '#111', color: '#0f0', border: '1px solid #0f0',
+      borderRadius: '8px', font: '12px monospace', cursor: 'pointer',
+    });
+    btn.onclick = () => {
+      const show = box.style.display === 'none';
+      box.style.display = show ? 'block' : 'none';
+      if (show) box.textContent = JSON.stringify(report.last || result, null, 2);
+    };
+    if (!btn.parentElement) document.body.appendChild(btn);
   }
+  report.last = null;
 
-  setTimeout(report, 4000);
-  setTimeout(report, 10000);
+  setTimeout(() => { report(); report.last = true; }, 3000);
+  setInterval(report, 5000);
 })();
