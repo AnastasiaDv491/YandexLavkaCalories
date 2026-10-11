@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.4.0 (MVP)
+// @version      0.5.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -27,12 +27,17 @@
     itemSelector: '[data-qa="basket-item"], [data-auto="basketItem"], [data-qa^="product-card"], [data-auto^="productCard"]',
     fallbackItemSelector: 'a[href*="/product/"]',   // карточка товара = ссылка на страницу товара
     nameSelector: '[data-auto="productCardTitle"], [data-qa="product-name"], [class*="productName"], [class*="ProductCard_title"], h3, h4',
-    qtySelector: '[data-auto="quantityControl"], [class*="quantity"], [class*="counter"]',
+    qtySelector: '[data-auto="quantityControl"], [class*="quantity" i], [class*="counter" i]',
     priceSelector: '[class*="price" i]',
 
     pollIntervalMs: 1500,     // как часто пересканировать корзину
     cacheTtlDays: 30,         // срок жизни кэша калорийности
     maxPerItemKcal: 5000,     // защита от абсурдных значений
+
+    // «Состав» — заголовок блока с позициями корзины. Товары ищем ВНУТРИ него,
+    // чтобы не захватывать блок «Похожие товары / предложили купить».
+    cartSectionHeading: /^состав$/i,
+    excludeKeywords: ['похожие', 'вместе дешевле', 'часто берут', 'с этим товаром', 'рекомендуем', 'покупали'],
   };
 
   const OFF_URLS = [
@@ -217,10 +222,66 @@
       const m = qEl.textContent.match(/(\d+)/);
       if (m) return parseInt(m[1], 10);
     }
-    // эвристика: «×2», «2 шт» в тексте карточки
-    const m2 = node.textContent.match(/[×x]\s*(\d{1,3})\b|(\d{1,3})\s*шт\b/i);
+    // эвристика: «×2», «2 шт» в тексте карточки (без мягких переносов)
+    const m2 = cleanName(node.textContent).match(/[×x]\s*(\d{1,3})\b|(\d{1,3})\s*шт\b/i);
     if (m2) return parseInt(m2[1] || m2[2], 10);
     return 1;
+  }
+
+  // Основной путь: карточка = div с классом ProductListItem (позиции корзины)
+  // или ProductCard/ProductSnippet (карточки товаров). Названия берем из alt картинок.
+  const CARD_SELECTOR = '[class*="ProductListItem"], [class*="ProductCard"], [class*="ProductSnippet"]';
+
+  function collectCardItems(root) {
+    const cartRoot = findCartSection(root);   // ограничиваемся блоком «Состав», если найден
+    const cards = deepQueryAll(cartRoot, CARD_SELECTOR);
+    const items = [];
+    for (const card of cards) {
+      if (isInExcludedBlock(card)) continue;  // «похожие товары» и т.п. — не позиции корзины
+      const name = itemNameFromCard(card);
+      if (!isPlausibleName(name)) continue;
+      items.push(itemFromNode(card, name));
+    }
+    return dedupeByElement(items);
+  }
+
+  // Блок с позициями корзины: в Лавке он озаглавлен «Состав». Ищем заголовок
+  // с точным текстом «Состав» и поднимаемся до разумного контейнера (~150-600px).
+  function findCartSection(root) {
+    const heads = deepQueryAll(root, 'h1, h2, h3, h4, span, div');
+    for (const h of heads) {
+      const t = cleanName(h.textContent);
+      if (!CONFIG.cartSectionHeading.test(t)) continue;
+      // листовый элемент с текстом ровно «Состав»
+      let childText = false;
+      for (const c of h.children) {
+        if ((c.textContent || '').trim().length > 3) { childText = true; break; }
+      }
+      if (childText) continue;
+      let el = h;
+      for (let i = 0; i < 8 && el.parentElement; i++) {
+        el = el.parentElement;
+        const r = el.getBoundingClientRect();
+        if (r.height >= 150 && r.height <= 600) return el;
+      }
+      return h.parentElement || root;
+    }
+    return root; // фолбэк: вся страница/фрейм
+  }
+
+  // Карточка belongs к промомо-блоку («Похожие товары» и т.п.), если рядом есть такой заголовок
+  function isInExcludedBlock(card) {
+    let el = card;
+    for (let i = 0; i < 6 && el; i++) {
+      const prev = el.previousElementSibling;
+      const sibs = prev ? [prev] : [];
+      for (const s of sibs) {
+        const t = cleanName(s.textContent).toLowerCase();
+        if (CONFIG.excludeKeywords.some((k) => t.includes(k))) return true;
+      }
+      el = el.parentElement;
+    }
+    return false;
   }
 
   // Эвристика для названий: не «заголовки-меню», а похожи на товар
@@ -241,12 +302,46 @@
     return meaningful.length >= 1;
   }
 
+  // Картинка товара в Лавке имеет alt, равный названию («Коктейль детский… банан»).
+  // Это самый надежный источник чистого названия: без «изображение», цен и прочего мусора.
+  function cleanName(s) {
+    if (!s) return '';
+    return String(s)
+      .replace(/<notr>/gi, ' ')
+      .replace(/\u00ad/g, '')                       // мягкие переносы (Кок­тейль -> Коктейль)
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function itemNameFromCard(card) {
+    // 1) alt картинки товара — предпочтительный источник
+    const imgs = card.querySelectorAll('img[alt]');
+    let best = '';
+    for (const img of imgs) {
+      const a = cleanName(img.alt);
+      if (isPlausibleName(a) && a.length > best.length) best = a;
+    }
+    if (best) return best;
+    // 2) эвристика по текстовым элементам карточки (с очисткой от мягких переносов)
+    for (const el of card.querySelectorAll('span, div, a, h3, h4')) {
+      const t = cleanName(el.textContent);
+      if (!isPlausibleName(t)) continue;
+      let childText = false;
+      for (const c of el.children) {
+        if ((c.textContent || '').trim().length > 3) { childText = true; break; }
+      }
+      if (!childText) return t;
+    }
+    return '';
+  }
+
   function itemFromNode(node, name) {
+    const text = cleanName(node.textContent);
     return {
       el: node,
       name,
       barcode: findBarcodeInNode(node),
-      weightG: extractWeightGrams(node.textContent),
+      weightG: extractWeightGrams(text),
       qty: parseQuantity(node),
     };
   }
@@ -285,7 +380,7 @@
     const items = [];
     const texts = deepQueryAll(root, 'span, div, a, h3, h4');
     for (const el of texts) {
-      let txt = (el.textContent || '').replace(/\u00a0/g, ' ').replace(/<notr>/gi, ' ').replace(/\s+/g, ' ').trim();
+      let txt = cleanName(el.textContent);
       if (!isPlausibleName(txt)) continue;
       // листовость: у элемента нет дочерних элементов со значимым текстом
       let childText = false;
@@ -309,26 +404,31 @@
   }
 
   function collectCartItems(root) {
-    // 1) основной путь — data-атрибуты карточек товаров
-    let items = [];
-    root.querySelectorAll(CONFIG.itemSelector).forEach((node) => {
-      const nameEl = node.querySelector(CONFIG.nameSelector);
-      const name = nameEl ? nameEl.textContent.trim() : '';
-      if (!isPlausibleName(name)) return;
-      items.push(itemFromNode(node, name));
-    });
+    // 1) основной путь — карточки по стабильным классам Лавки + названия из alt картинок
+    let items = collectCardItems(root);
 
-    // 2) фолбэк — ссылки на страницы товаров: их родитель-карточка и есть товар
+    // 2) data-атрибуты (если Лавка вернет их в будущей верстке)
+    if (items.length === 0) {
+      root.querySelectorAll(CONFIG.itemSelector).forEach((node) => {
+        const nameEl = node.querySelector(CONFIG.nameSelector);
+        const name = nameEl ? cleanName(nameEl.textContent) : itemNameFromCard(node);
+        if (!isPlausibleName(name)) return;
+        items.push(itemFromNode(node, name));
+      });
+      items = dedupeByElement(items);
+    }
+
+    // 3) фолбэк — ссылки на страницы товаров: их родитель-карточка и есть товар
     if (items.length === 0) {
       root.querySelectorAll(CONFIG.fallbackItemSelector).forEach((a) => {
         const card = a.closest('li, article, [class*="card" i], [class*="Card"]') || a.parentElement || a;
-        const name = (a.textContent || '').trim().split('\n')[0].trim();
+        const name = itemNameFromCard(card) || cleanName(a.textContent).split('\n')[0].trim();
         if (!isPlausibleName(name)) return;
         items.push(itemFromNode(card, name));
       });
     }
 
-    // 3) последняя эвристика — блоки «картинка + название + цена»
+    // 4) последняя эвристика — блоки «картинка + название + цена»
     if (items.length === 0) {
       items = collectCardLikeItems(root);
     }

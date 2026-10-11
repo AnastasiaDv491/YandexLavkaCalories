@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Лавка — Диагностика v3 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.6.0
+// @version      0.7.0
 // @description  Кнопка «Диагностика»: сканирует ТУТ ЖЕ документ (и shadow DOM) на наличие товаров корзины; работает во всех фреймах и iframe Лавки
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -86,6 +86,19 @@
   // признаками карточки (изображение + текст с ₽ рядом).
   function collectCardCandidates(doc) {
     const out = [];
+    // 0) карточки Лавки по классам + alt картинок (основной путь userscript v0.5)
+    deepAllElements(doc).forEach((el) => {
+      if (out.length >= 12) return;
+      const cls = el.className && el.className.toString ? el.className.toString() : '';
+      if (!/ProductListItem|ProductCard|ProductSnippet/.test(cls)) return;
+      const alts = [];
+      el.querySelectorAll('img[alt]').forEach((im) => {
+        const a = (im.alt || '').replace(/\u00ad/g, '').replace(/<notr>/gi, ' ').replace(/\s+/g, ' ').trim();
+        if (a && a.length > 3) alts.push(a.slice(0, 70));
+      });
+      const qtyM = (el.textContent || '').match(/[×x]\s*(\d{1,3})\b|(\d{1,3})\s*шт\b/i);
+      out.push({ kind: 'lavka-card', cls: cls.split(' ').slice(0, 3).join('.'), alts, qtyHint: qtyM ? (qtyM[1] || qtyM[2]) : null });
+    });
     // 1) любые ссылки, похожие на товарные
     deepAllElements(doc).forEach((el) => {
       if (out.length >= 25) return;
