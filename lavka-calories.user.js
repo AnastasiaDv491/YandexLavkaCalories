@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.13.0 (MVP)
+// @version      0.14.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -67,9 +67,9 @@
 
   function cacheGet(key) {
     const entry = loadCache()[key];
-    if (!entry) return null;
-    if (Date.now() - entry.ts > CONFIG.cacheTtlDays * 86400000) return null;
-    return entry.value;
+    if (!entry) return undefined; // не найдено — идем в API
+    if (Date.now() - entry.ts > CONFIG.cacheTtlDays * 86400000) return undefined; // устарело
+    return entry.value; // может быть 'unknown' (маркер «нет данных») или объект
   }
 
   function cacheSet(key, value) {
@@ -192,7 +192,12 @@
       cacheSet(key, cached);
     }
 
-    if (cached === 'unknown') return { known: false };
+    if (cached === 'unknown' || cached === null) return { known: false };
+    // защита от поврежденных записей кэша (например, сохраненных до фикса cacheGet)
+    if (typeof cached !== 'object' || typeof cached.kcalPer100g !== 'number') {
+      cacheSet(key, 'unknown');
+      return { known: false, reason: 'bad-cache' };
+    }
 
     // kcal = kcal/100g * вес_товара * количество
     const weightG = item.weightG || cached.weightG;
