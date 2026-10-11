@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Лавка — Диагностика v3 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      1.0.0
+// @version      1.1.0
 // @description  Кнопка «Диагностика»: сканирует ТУТ ЖЕ документ (и shadow DOM) на наличие товаров корзины; работает во всех фреймах и iframe Лавки
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -180,9 +180,40 @@
     // Сканируем ТОЛЬКО собственный документ (включая shadow DOM) — скрипт сам
     // запустится отдельно в каждом iframe, где ему позволено.
     const attrs = collectAttrs(document);
+
+    // === Диагностика «почему Tampermonkey не запускает скрипт» ===
+    // В Chrome для сайтов, открытых НЕ через https (или при кривых @match), TM может
+    // молча не внедрять скрипт. Проверяем: виден ли сам debug-скрипт в этом окне,
+    // есть ли window.Tampermonkey/Violentmonkey и какой protocol/url у документа.
+    let injectedHere = false;
+    try {
+      injectedHere = typeof GM_info !== 'undefined' && !!(GM_info.script && GM_info.script.name);
+    } catch (e) { /* ignore */ }
+    const env = {
+      protocol: location.protocol,
+      href: location.href,
+      tmGlobal: !!(window.Tampermonkey || window.Violentmonkey),
+      scriptName: injectedHere ? GM_info.script.name : null,
+      isTop: window.top === window,
+      parentUrl: (() => { try { return window.parent !== window.top ? document.referrer : null; } catch (e) { return 'cross-origin'; } })(),
+    };
+
+    // Если корзина живёт в ДРУГОМ окне (например, модальное окно Лавки открывается
+    // как отдельный popup/iframe на другом домене), покажем это явно.
+    let childFrames = [];
+    try {
+      for (const f of [...document.querySelectorAll('iframe'), ...document.querySelectorAll('frame')]) {
+        let sameOrigin = false, inner = null;
+        try { sameOrigin = !!f.contentWindow && !!f.contentDocument; inner = f.contentWindow && f.contentWindow.location ? f.contentWindow.location.href : null; } catch (e) { /* cross-origin */ }
+        childFrames.push({ src: (f.getAttribute('src') || '').slice(0, 120), sameOrigin, innerUrl: inner });
+      }
+    } catch (e) { /* ignore */ }
+
     const result = {
       frameUrl: location.href,
       isLavkaFrame,
+      env,
+      childFrames,
       title: document.title.slice(0, 80),
       attrKeys: Object.keys(attrs).length,
       attrs,

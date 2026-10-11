@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.9.0 (MVP)
+// @version      0.10.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -550,14 +550,29 @@
       items = dedupeByNames(items);
     }
 
-    // 3) фолбэк — ссылки на страницы товаров: их родитель-карточка и есть товар
+    // 3) фолбэк — ссылки на страницы товаров: их родитель-карточка и есть товар.
+    // В актуальной корзине Лавки позиции содержат a[href*="/good/"], а не /product/.
     if (items.length === 0) {
-      root.querySelectorAll(CONFIG.fallbackItemSelector).forEach((a) => {
-        const card = a.closest('li, article, [class*="card" i], [class*="Card"]') || a.parentElement || a;
-        const name = itemNameFromCard(card) || cleanName(a.textContent).split('\n')[0].trim();
-        if (!isPlausibleName(name)) return;
-        items.push(itemFromNode(card, name));
-      });
+      const seen = new Set();
+      for (const sel of ['a[href*="/product/"]', 'a[href*="/good/"]']) {
+        deepQueryAll(root, sel).forEach((a) => {
+          const card = a.closest('li, article, [class*="card" i], [class*="Card"], [class*="ProductListItem"], [class*="snippet" i]') || a.parentElement || a;
+          if (seen.has(card)) return;
+          seen.add(card);
+          const name = fullTitleFromCard(card) || itemNameFromCard(card) || cleanName(a.textContent).split('\n')[0].trim();
+          if (!isPlausibleName(name)) return;
+          if (isInExcludedBlock(card)) return;
+          items.push({
+            el: card,
+            key: cardKey(card) || ('fb:' + name),
+            name,
+            barcode: findBarcodeInNode(card),
+            weightG: weightFromCard(card) || extractWeightGrams(cleanName(card.textContent)),
+            qty: parseQuantity(card),
+          });
+        });
+        if (items.length > 0) break; // первый сработавший селектор достаточен
+      }
     }
 
     // 4) последняя эвристика — блоки «картинка + название + цена»
@@ -625,6 +640,23 @@
     statusEl.textContent = text;
   }
 
+  // Одноразовая диагностика пустого результата: считает базовые селекторы и пишет
+  // вывод в консоль. Ключевая разгадка «зависания»: если cart_item_/ProductListItem = 0,
+  // а goodLinks > 0 — корзина лежит во фрейме/окне, куда userscript не дотягивается.
+  let diagLogged = false;
+  function diagOnce() {
+    const nTestId = document.querySelectorAll('[data-testid^="cart_item_"]').length;
+    const nListItem = document.querySelectorAll('[class*="ProductListItem"]').length;
+    const nGoodLink = document.querySelectorAll('a[href*="/good/"]').length;
+    const hasBasketWords = /корзина|итого/i.test(document.body ? document.body.textContent : '');
+    const info = { url: location.href, cartItemTestids: nTestId, productListItems: nListItem, goodLinks: nGoodLink, basketWordsOnPage: hasBasketWords };
+    if (!diagLogged) {
+      diagLogged = true;
+      console.warn('[lavka-kcal] товаров не найдено:', info);
+    }
+    setStatus(`Лавка-ккал: товаров не найдено (cart_item: ${nTestId}, ProductListItem: ${nListItem}, ссылок /good/: ${nGoodLink}). Подробности — в консоли (F12).`);
+  }
+
   async function tick() {
     if (running) return;
     running = true;
@@ -639,7 +671,9 @@
         return;
       }
       if (items.length === 0) {
-        setStatus('Лавка-ккал: товаров не найдено. Откройте корзину Лавки и подождите пару секунд.');
+        // Диагностика «зависания»: показываем в индикаторе и консоли, что нашли/не нашли
+        // базовые селекторы — это отличает «карточек нет в DOM» от «есть, но названий не дождались».
+        diagOnce();
         return;
       }
 
