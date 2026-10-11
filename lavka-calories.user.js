@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.17.2 (MVP)
+// @version      0.18 (MVP)
 // @description  Показывает суммарные ккал товаров корзины: КБЖУ берутся из карточек самой Яндекс Лавки (страницы /good/<id>), при отсутствии — из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -737,55 +737,70 @@
   // v0.17.2: полный сброс наследуемых стилей Лавки + фиксированная ширина.
   // Без этого блок «сжимался»: Лавка задаёт своим контейнерам flex/grid с
   // min-width:0 и clamp-типографикой, из-за чего текст налезал друг на друга.
-  const WIDGET_BASE_CSS = [
-    'all: revert', // отбрасываем все унаследованные правила страницы
-    'display:block !important',
-    'box-sizing:border-box !important',
-    'width:auto !important',
-    'min-width:260px !important',
-    'max-width:340px !important',
-    'margin:10px 0 0 !important',
-    'padding:10px 14px !important',
-    'border-radius:12px !important',
-    'background:#f5f5ff !important',
-    'border:1px solid #d0d0f0 !important',
-    'font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif !important',
-    'font-size:14px !important',
-    'line-height:1.45 !important',
-    'color:#222 !important',
-    'text-align:left !important',
-    'white-space:normal !important',
-    'overflow:visible !important',
-    'z-index:999997 !important',
-  ].join(';');
+  // v0.18: виджет живёт в собственном fixed-хосте вне DOM Лавки и изолирован shadow DOM —
+// стили/перерисовки SPA больше не могут его «сжать» или удалить.
+const HOST_CSS = [
+    'position:fixed !important',
+    'bottom:40px !important',
+    'right:8px !important',
+    'width:300px !important',
+    'z-index:2147483647 !important',
+    'pointer-events:auto !important',
+].join(';');
 
-  function ensureWidget(container) {
-    let w = document.getElementById('lavka-kcal-widget');
-    if (w) return w;
-    w = document.createElement('div');
-    w.id = 'lavka-kcal-widget';
-    w.setAttribute('style', WIDGET_BASE_CSS);
-    container.appendChild(w);
-    return w;
+  function ensureHost() {
+    let host = document.getElementById('lavka-kcal-host');
+    if (!host || !host.isConnected) {
+      host && host.remove();
+      host = document.createElement('div');
+      host.id = 'lavka-kcal-host';
+      host.setAttribute('style', HOST_CSS);
+      (document.body || document.documentElement).appendChild(host);
+    }
+    return host;
   }
 
-  function renderWidget(widget, total, knownCount, totalCount, details) {
-    if (totalCount === 0) { widget.innerHTML = ''; widget.style.display = 'none'; return; }
-    widget.style.display = 'block';
+  function ensureShadow(host) {
+    let root = host.__kcalShadow;
+    if (!root || !host.shadowRoot) {
+      root = host.attachShadow({ mode: 'open' });
+      const style = document.createElement('style');
+      style.textContent = [
+        ':host{all:initial;display:block}',
+        '*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif}',
+        '.card{background:#f5f5ff;border:1px solid #d0d0f0;border-radius:12px;padding:10px 14px;color:#222;font-size:14px;line-height:1.45;text-align:left;box-shadow:0 2px 10px rgba(0,0,0,.12)}',
+        '.head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px 8px}',
+        '.head strong{font-weight:600;font-size:15px;color:#222}',
+        '.head span{color:#888;font-size:12px}',
+        'details{margin-top:6px}',
+        'summary{cursor:pointer;font-size:12px;color:#666}',
+        '.row{font-size:12px;color:#555;line-height:1.4;margin-top:2px;word-break:break-word}',
+      ].join('\n');
+      root.appendChild(style);
+      const card = document.createElement('div');
+      card.className = 'card';
+      root.appendChild(card);
+      host.__kcalShadow = root;
+      host.__kcalCard = card;
+    }
+    return root;
+  }
+
+  function renderWidget(total, knownCount, totalCount, details) {
+    const host = ensureHost();
+    const root = ensureShadow(host);
+    const card = host.__kcalCard;
+    if (totalCount === 0) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
     const label = total != null
       ? `≈ ${total.toLocaleString('ru-RU')} ккал`
       : 'Калории неизвестны';
     const coverage = `известно для ${knownCount} из ${totalCount}`;
-    const rows = details.map((d) =>
-      `<div style="font-size:12px!important;color:#555!important;line-height:1.4!important;margin-top:2px!important;white-space:normal!important">${d}</div>`).join('');
-    // v0.17.2: внутренние элементы тоже с !important, чтобы clamp/flex Лавки их не ломали
-    widget.innerHTML =
-      `<div style="display:flex!important;justify-content:space-between!important;align-items:center!important;flex-wrap:wrap!important;gap:4px 8px!important;width:100%!important">` +
-        `<strong style="font-weight:600!important;font-size:15px!important;line-height:1.3!important;color:#222!important;display:block!important">${label}</strong>` +
-        `<span style="color:#888!important;font-size:12px!important;line-height:1.3!important;display:block!important">${coverage}</span>` +
-      `</div>` +
-      `<details style="margin-top:6px!important;width:100%!important"><summary style="cursor:pointer!important;font-size:12px!important;color:#666!important;line-height:1.4!important">по товарам</summary>` +
-      `<div style="margin-top:4px!important">${rows}</div></details>`;
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const rows = details.map((d) => `<div class="row">${esc(d)}</div>`).join('');
+    card.innerHTML =
+      `<div class="head"><strong>${label}</strong><span>${coverage}</span></div>` +
+      `<details><summary>по товарам</summary><div>${rows}</div></details>`;
   }
 
   /* ============================================================
@@ -848,7 +863,8 @@
         // базовые селекторы. ВАЖНО (v0.13): если уже есть готовый виджет с результатом,
         // НЕ затираем его статусом «не найдено» — в SPA Лавки корзина монтируется/размонтируется
         // при переходах, и пустой tick сбрасывал бы показанный итог ккал.
-        const hasWidget = !!document.getElementById('lavka-kcal-widget');
+        const host = document.getElementById('lavka-kcal-host');
+        const hasWidget = !!(host && host.shadowRoot && host.__kcalCard && host.__kcalCard.style.display !== 'none' && host.__kcalCard.innerHTML);
         diagOnce(hasWidget);
         return;
       }
@@ -883,12 +899,10 @@
         }
       });
 
-      // Вставляем виджет рядом с блоком итога (ищем элемент со словом «Итого»)
-      const summaryEl = [...document.querySelectorAll('div,section')]
-        .find((el) => el.children.length < 8 && /итого/i.test(el.textContent) && el.getBoundingClientRect().width < 500);
-      const widget = ensureWidget(summaryEl ? summaryEl.parentElement : document.body);
-      renderWidget(widget, knownCount > 0 ? total : null, knownCount, items.length, details);
-      setStatus(`Лавка-ккал: v0.17 | товаров ${items.length}, ккал посчитано для ${knownCount}${summaryEl ? '' : ' (блок «Итого» не найден — виджет в углу страницы)'}`);
+      // v0.18: виджет всегда в собственном fixed-хосте (справа внизу) — SPA Лавки
+      // больше не может его удалить/сжать при перерисовке корзины.
+      renderWidget(knownCount > 0 ? total : null, knownCount, items.length, details);
+      setStatus(`Лавка-ккал: v0.18 | товаров ${items.length}, ккал посчитано для ${knownCount}`);
     } finally {
       running = false;
     }
