@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Лавка — Диагностика v3 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.5.0
+// @version      0.6.0
 // @description  Кнопка «Диагностика»: сканирует ТУТ ЖЕ документ (и shadow DOM) на наличие товаров корзины; работает во всех фреймах и iframe Лавки
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -17,6 +17,20 @@
   // Скрипт запускается и в верхнем окне, и внутри каждого iframe (без @noframes),
   // поэтому каждое окно сканирует САМО СЕБЯ — так мы точно увидим, где живёт корзина.
   const isLavkaFrame = /lavka\.yandex\.ru|yandex\.ru\/lavka|yandex\.(net|ru)/.test(location.href);
+
+  // Рекурсивный обход всего дерева (включая shadow DOM): собирает ВСЕ элементы.
+  function deepAllElements(root, acc, limit) {
+    acc = acc || [];
+    limit = limit || 20000;
+    try {
+      root.querySelectorAll('*').forEach((el) => {
+        if (acc.length >= limit) return;
+        acc.push(el);
+        if (el.shadowRoot) deepAllElements(el.shadowRoot, acc, limit);
+      });
+    } catch (e) { /* ignore */ }
+    return acc;
+  }
 
   function collectAttrs(doc) {
     const attrs = {};
@@ -67,6 +81,61 @@
     }));
   }
 
+  // Гипотеза: Лавка использует нестандартные ссылки на товары (не /product/).
+  // Собираем все <a> с href, содержащим "lavka" или цифры-id, и все элементы с
+  // признаками карточки (изображение + текст с ₽ рядом).
+  function collectCardCandidates(doc) {
+    const out = [];
+    // 1) любые ссылки, похожие на товарные
+    deepAllElements(doc).forEach((el) => {
+      if (out.length >= 25) return;
+      const tag = el.tagName ? el.tagName.toLowerCase() : '';
+      if (tag === 'a' || tag === 'area') {
+        const href = el.getAttribute('href') || '';
+        if (/\/product|\/item|lavka\.yandex\.net|id=\d+|\/\d{6,}/.test(href)) {
+          out.push({ kind: 'link', href: href.slice(0, 140), text: (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80) });
+        }
+      }
+    });
+    // 2) элементы, у которых прямой текст похож на название товара (кириллица, без ₽),
+    //    а в родителе есть картинка и цена — типичная карточка
+    const all = deepAllElements(doc);
+    for (const el of all) {
+      if (out.length >= 30) break;
+      const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (txt.length < 4 || txt.length > 70) continue;
+      if (!/[а-яё]/i.test(txt)) continue;
+      if (/₽/.test(txt)) continue;
+      // «листовой» текстовый элемент: у него нет дочерних текстовых блоков длиннее его самого
+      let hasChildText = false;
+      for (const c of el.children) {
+        if ((c.textContent || '').trim().length > 3) { hasChildText = true; break; }
+      }
+      if (hasChildText) continue;
+      const parent = el.parentElement ? (el.parentElement.parentElement || el.parentElement) : null;
+      if (!parent) continue;
+      const pTxt = parent.textContent || '';
+      if (!/₽/.test(pTxt)) continue;                 // в блоке есть цена
+      if (!parent.querySelector('img')) continue;    // и картинка
+      out.push({
+        kind: 'card-like',
+        text: txt,
+        chain: (() => {
+          const chain = [];
+          let p = el;
+          for (let i = 0; p && i < 5; i++) {
+            chain.push(p.tagName.toLowerCase() + (typeof p.className === 'string' && p.className.trim() ? '.' + p.className.trim().split(/\s+/).slice(0, 2).join('.') : ''));
+            p = p.parentElement;
+          }
+          return chain.join(' < ');
+        })(),
+      });
+    }
+    // дедуп по тексту
+    const seen = new Set();
+    return out.filter((o) => { const k = o.text; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 25);
+  }
+
   function report() {
     // Сканируем ТОЛЬКО собственный документ (включая shadow DOM) — скрипт сам
     // запустится отдельно в каждом iframe, где ему позволено.
@@ -78,6 +147,7 @@
       attrKeys: Object.keys(attrs).length,
       attrs,
       productLinks: collectProductLinks(document),
+      cardCandidates: collectCardCandidates(document),
       basketTextHits: (() => {
         // ищем текстовые маркеры корзины, чтобы понять, в этом ли окне она отрендерена
         const t = (document.body && document.body.textContent) || '';

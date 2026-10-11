@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.3.0 (MVP)
+// @version      0.4.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -217,14 +217,28 @@
       const m = qEl.textContent.match(/(\d+)/);
       if (m) return parseInt(m[1], 10);
     }
+    // эвристика: «×2», «2 шт» в тексте карточки
+    const m2 = node.textContent.match(/[×x]\s*(\d{1,3})\b|(\d{1,3})\s*шт\b/i);
+    if (m2) return parseInt(m2[1] || m2[2], 10);
     return 1;
   }
 
   // Эвристика для названий: не «заголовки-меню», а похожи на товар
-  const BAD_NAME_RE = /^(корзина|оформить|итого|доставка|товары|еще|ёще|показать|купить|в корзину|лавка|каталог|избранное)$/i;
+  const BAD_WORDS = new Set([
+    'корзина', 'очистить', 'доставка', 'итого', 'оформить', 'товары', 'состав',
+    'купить', 'лавка', 'каталог', 'избранное', 'скидка', 'скидки', 'цена',
+    '₽', 'г', 'кг', 'мл', 'шт', 'за', 'шт.', 'вместо', 'обычной', 'бесплатной',
+  ]);
 
   function isPlausibleName(name) {
-    return name && name.length >= 3 && !BAD_NAME_RE.test(name);
+    if (!name || name.length < 3 || name.length > 120) return false;
+    if (/^[^\p{L}]*$/u.test(name)) return false;        // без букв — не название
+    if (/^(еще|ёще|пропустить|перейти|показать|вернуться)/i.test(name)) return false;
+    if (/\d+\s*₽/.test(name)) return false;             // название с ценой — это блок целиком
+    const words = name.toLowerCase().replace(/[^\p{L}\p{N}\s]+/gu, ' ').split(/\s+/).filter(Boolean);
+    if (words.length === 0) return false;
+    const meaningful = words.filter((w) => w.length > 2 && !BAD_WORDS.has(w));
+    return meaningful.length >= 1;
   }
 
   function itemFromNode(node, name) {
@@ -253,6 +267,47 @@
     return out;
   }
 
+  // Глубокий обход: обычный DOM + shadow DOM (Лавка может рендерить корзину в теневом дереве)
+  function deepQueryAll(root, selector, acc) {
+    acc = acc || [];
+    try { root.querySelectorAll(selector).forEach((el) => acc.push(el)); } catch (e) { /* ignore */ }
+    try {
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot) deepQueryAll(el.shadowRoot, selector, acc);
+      });
+    } catch (e) { /* ignore */ }
+    return acc;
+  }
+
+  // Третий уровень эвристики: «карточка» = текстовый элемент с названием товара,
+  // внутри блока которого есть картинка и цена. Работает без data-атрибутов и ссылок.
+  function collectCardLikeItems(root) {
+    const items = [];
+    const texts = deepQueryAll(root, 'span, div, a, h3, h4');
+    for (const el of texts) {
+      let txt = (el.textContent || '').replace(/\u00a0/g, ' ').replace(/<notr>/gi, ' ').replace(/\s+/g, ' ').trim();
+      if (!isPlausibleName(txt)) continue;
+      // листовость: у элемента нет дочерних элементов со значимым текстом
+      let childText = false;
+      for (const c of el.children) {
+        if ((c.textContent || '').trim().length > 3) { childText = true; break; }
+      }
+      if (childText) continue;
+      // поднимаемся до ближайшего предка, где есть и картинка, и цена — это карточка
+      let card = el;
+      for (let i = 0; i < 6 && card.parentElement; i++) {
+        card = card.parentElement;
+        const t = card.textContent || '';
+        if (/₽/.test(t) && (card.querySelector('img') || card.querySelector('[class*="image" i], [class*="media" i]'))) break;
+        card = null;
+      }
+      if (!card) continue;
+      // если название начинается не с начала текста — чистим префиксы («Коктейль ... банан»)
+      items.push(itemFromNode(card, txt));
+    }
+    return dedupeByElement(items);
+  }
+
   function collectCartItems(root) {
     // 1) основной путь — data-атрибуты карточек товаров
     let items = [];
@@ -271,6 +326,11 @@
         if (!isPlausibleName(name)) return;
         items.push(itemFromNode(card, name));
       });
+    }
+
+    // 3) последняя эвристика — блоки «картинка + название + цена»
+    if (items.length === 0) {
+      items = collectCardLikeItems(root);
     }
 
     return dedupeByElement(items);
