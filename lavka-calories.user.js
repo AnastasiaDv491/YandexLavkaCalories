@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.12.0 (MVP)
+// @version      0.13.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -339,7 +339,11 @@
     // 1) ГЛАВНЫЙ путь: позиции корзины — элементы data-testid="cart_item_<id>".
     // Это точный маркер именно корзинных позиций: промо-карточки («Предложили
     // купить») имеют другие testid (promo_...) или не имеют их вовсе.
-    let nodes = deepQueryAll(root, '[data-testid^="cart_item_"]');
+    // v0.13: ищем и по document напрямую — deepQueryAll на объекте `document`
+    // в некоторых окружениях может вернуть пусто, и тогда корзина «не найдена».
+    let nodes = [];
+    try { nodes = Array.from(document.querySelectorAll('[data-testid^="cart_item_"]')); } catch (e) { /* ignore */ }
+    if (nodes.length === 0) nodes = deepQueryAll(root, '[data-testid^="cart_item_"]');
     if (nodes.length === 0) {
       // 2) фолбэк: все ProductListItem, но затем скоупинг блоком «Состав»,
       // чтобы не захватить промо-лист из той же секции.
@@ -669,7 +673,7 @@
   // вывод в консоль. Ключевая разгадка «зависания»: если cart_item_/ProductListItem = 0,
   // а goodLinks > 0 — корзина лежит во фрейме/окне, куда userscript не дотягивается.
   let diagLogged = false;
-  function diagOnce() {
+  function diagOnce(hasWidget) {
     const nTestId = document.querySelectorAll('[data-testid^="cart_item_"]').length;
     const nListItem = document.querySelectorAll('[class*="ProductListItem"]').length;
     const nGoodLink = document.querySelectorAll('a[href*="/good/"]').length;
@@ -679,6 +683,7 @@
       diagLogged = true;
       console.warn('[lavka-kcal] товаров не найдено:', info);
     }
+    if (hasWidget) return; // результат уже показан — не затираем статус
     setStatus(`Лавка-ккал: товаров не найдено (cart_item: ${nTestId}, ProductListItem: ${nListItem}, ссылок /good/: ${nGoodLink}). Подробности — в консоли (F12).`);
   }
 
@@ -697,8 +702,11 @@
       }
       if (items.length === 0) {
         // Диагностика «зависания»: показываем в индикаторе и консоли, что нашли/не нашли
-        // базовые селекторы — это отличает «карточек нет в DOM» от «есть, но названий не дождались».
-        diagOnce();
+        // базовые селекторы. ВАЖНО (v0.13): если уже есть готовый виджет с результатом,
+        // НЕ затираем его статусом «не найдено» — в SPA Лавки корзина монтируется/размонтируется
+        // при переходах, и пустой tick сбрасывал бы показанный итог ккал.
+        const hasWidget = !!document.getElementById('lavka-kcal-widget');
+        diagOnce(hasWidget);
         return;
       }
 
@@ -709,6 +717,10 @@
 
       const results = await Promise.all(items.map(getKcal));
 
+      // Перерисовываем виджет ТОЛЬКО если корзина всё ещё на экране: страница Лавки
+      // — SPA, при переходе в каталог позиции исчезают из DOM. Раньше статус
+      // «товаров не найдено» перезаписывал готовый результат за 1.5 сек до того,
+      // как успевали вернуться ответы Open Food Facts — казалось, что «всё зависло».
       let total = 0, knownCount = 0;
       const details = [];
       results.forEach((r, idx) => {
@@ -733,7 +745,25 @@
     }
   }
 
-  setInterval(tick, CONFIG.pollIntervalMs);
-  setStatus('Лавка-ккал: скрипт запущен, сканирую страницу…');
-  tick();
+  let tickErrors = 0;
+  function safeTick() {
+    try {
+      const p = tick();
+      if (p && typeof p.catch === 'function') {
+        p.catch((e) => {
+          tickErrors++;
+          setStatus('Лавка-ккал: ошибка расчёта #' + tickErrors + ' — ' + (e && e.message ? e.message : e));
+          console.error('[lavka-kcal]', e);
+        });
+      }
+    } catch (e) {
+      tickErrors++;
+      setStatus('Лавка-ккал: ошибка сканера #' + tickErrors + ' — ' + (e && e.message ? e.message : e));
+      console.error('[lavka-kcal]', e);
+    }
+  }
+
+  setInterval(safeTick, CONFIG.pollIntervalMs);
+  setStatus('Лавка-ккал: v0.13 запущен, сканирую страницу…');
+  safeTick();
 })();

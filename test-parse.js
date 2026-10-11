@@ -9,9 +9,9 @@ global.fetch = () => Promise.reject(new Error('offline test'));
 global.navigator = dom.window.navigator;
 
 let src = fs.readFileSync('lavka-calories.user.js', 'utf8');
-src = src.replace('setInterval(tick, CONFIG.pollIntervalMs);', '');
-src = src.replace("setStatus('Лавка-ккал: скрипт запущен, сканирую страницу…');", '');
-src = src.replace('tick();', 'window.__collectCartItems = collectCartItems;');
+src = src.replace('setInterval(safeTick, CONFIG.pollIntervalMs);', '');
+src = src.replace("setStatus('Лавка-ккал: v0.13 запущен, сканирую страницу…');", '');
+src = src.replace('safeTick();', 'window.__collectCartItems = collectCartItems;');
 dom.window.eval(src);
 
 const items = dom.window.__collectCartItems(dom.window.document);

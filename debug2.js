@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Лавка — Диагностика v3 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      1.3.0
+// @version      1.4.0
 // @description  Кнопка «Диагностика»: сканирует ТУТ ЖЕ документ (и shadow DOM) на наличие товаров корзины; работает во всех фреймах и iframe Лавки
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -174,9 +174,15 @@
         })(),
       });
     }
-    // дедуп по тексту
+    // дедуп: у lavka-card ключ — testid (у них нет поля text!), иначе все позиции
+    // корзины, кроме первой, считались «дубликатами» и вырезались из JSON.
     const seen = new Set();
-    return out.filter((o) => { const k = o.text; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 25);
+    return out.filter((o) => {
+      const k = o.kind === 'lavka-card' ? 'tid:' + (o.testid || '') : 't:' + o.text;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    }).slice(0, 40);
   }
 
   function report() {
