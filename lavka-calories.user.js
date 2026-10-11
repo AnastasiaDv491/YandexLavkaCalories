@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.16.0 (MVP)
+// @version      0.17.2 (MVP)
 // @description  Показывает суммарные ккал товаров корзины: КБЖУ берутся из карточек самой Яндекс Лавки (страницы /good/<id>), при отсутствии — из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -734,16 +734,37 @@
    * UI ВИДЖЕТ (рядом с итогом корзины)
    * ============================================================ */
 
+  // v0.17.2: полный сброс наследуемых стилей Лавки + фиксированная ширина.
+  // Без этого блок «сжимался»: Лавка задаёт своим контейнерам flex/grid с
+  // min-width:0 и clamp-типографикой, из-за чего текст налезал друг на друга.
+  const WIDGET_BASE_CSS = [
+    'all: revert', // отбрасываем все унаследованные правила страницы
+    'display:block !important',
+    'box-sizing:border-box !important',
+    'width:auto !important',
+    'min-width:260px !important',
+    'max-width:340px !important',
+    'margin:10px 0 0 !important',
+    'padding:10px 14px !important',
+    'border-radius:12px !important',
+    'background:#f5f5ff !important',
+    'border:1px solid #d0d0f0 !important',
+    'font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif !important',
+    'font-size:14px !important',
+    'line-height:1.45 !important',
+    'color:#222 !important',
+    'text-align:left !important',
+    'white-space:normal !important',
+    'overflow:visible !important',
+    'z-index:999997 !important',
+  ].join(';');
+
   function ensureWidget(container) {
     let w = document.getElementById('lavka-kcal-widget');
     if (w) return w;
     w = document.createElement('div');
     w.id = 'lavka-kcal-widget';
-    Object.assign(w.style, {
-      marginTop: '8px', padding: '8px 12px', borderRadius: '10px',
-      background: '#f5f5ff', border: '1px solid #d0d0f0',
-      fontFamily: 'inherit', fontSize: '14px', lineHeight: '1.4',
-    });
+    w.setAttribute('style', WIDGET_BASE_CSS);
     container.appendChild(w);
     return w;
   }
@@ -756,11 +777,15 @@
       : 'Калории неизвестны';
     const coverage = `известно для ${knownCount} из ${totalCount}`;
     const rows = details.map((d) =>
-      `<div style="font-size:12px;color:#555">${d}</div>`).join('');
+      `<div style="font-size:12px!important;color:#555!important;line-height:1.4!important;margin-top:2px!important;white-space:normal!important">${d}</div>`).join('');
+    // v0.17.2: внутренние элементы тоже с !important, чтобы clamp/flex Лавки их не ломали
     widget.innerHTML =
-      `<div style="display:flex;justify-content:space-between;align-items:center">` +
-        `<strong>${label}</strong><span style="color:#888;font-size:12px">${coverage}</span>` +
-      `</div><details style="margin-top:4px"><summary style="cursor:pointer;font-size:12px;color:#666">по товарам</summary>${rows}</details>`;
+      `<div style="display:flex!important;justify-content:space-between!important;align-items:center!important;flex-wrap:wrap!important;gap:4px 8px!important;width:100%!important">` +
+        `<strong style="font-weight:600!important;font-size:15px!important;line-height:1.3!important;color:#222!important;display:block!important">${label}</strong>` +
+        `<span style="color:#888!important;font-size:12px!important;line-height:1.3!important;display:block!important">${coverage}</span>` +
+      `</div>` +
+      `<details style="margin-top:6px!important;width:100%!important"><summary style="cursor:pointer!important;font-size:12px!important;color:#666!important;line-height:1.4!important">по товарам</summary>` +
+      `<div style="margin-top:4px!important">${rows}</div></details>`;
   }
 
   /* ============================================================
@@ -863,7 +888,7 @@
         .find((el) => el.children.length < 8 && /итого/i.test(el.textContent) && el.getBoundingClientRect().width < 500);
       const widget = ensureWidget(summaryEl ? summaryEl.parentElement : document.body);
       renderWidget(widget, knownCount > 0 ? total : null, knownCount, items.length, details);
-      setStatus(`Лавка-ккал: v0.16 | товаров ${items.length}, ккал посчитано для ${knownCount}${summaryEl ? '' : ' (блок «Итого» не найден — виджет в углу страницы)'}`);
+      setStatus(`Лавка-ккал: v0.17 | товаров ${items.length}, ккал посчитано для ${knownCount}${summaryEl ? '' : ' (блок «Итого» не найден — виджет в углу страницы)'}`);
     } finally {
       running = false;
     }
