@@ -275,13 +275,33 @@
   let lastHtmlHash = '';
   let running = false;
 
+  // Индикатор внизу страницы: сразу видно, работает ли скрипт и что он нашел.
+  // Если через ~10 сек индикатора нет — Tampermonkey не запускает скрипт на этом сайте.
+  let statusEl = null;
+  function setStatus(text) {
+    if (!statusEl) {
+      statusEl = document.createElement('div');
+      statusEl.id = 'lavka-kcal-status';
+      Object.assign(statusEl.style, {
+        position: 'fixed', bottom: '8px', right: '8px', zIndex: 999998,
+        background: '#222', color: '#fafafa', padding: '6px 10px',
+        borderRadius: '8px', font: '12px sans-serif', opacity: '0.85',
+      });
+      document.body.appendChild(statusEl);
+    }
+    statusEl.textContent = text;
+  }
+
   async function tick() {
     if (running) return;
     running = true;
     try {
       const cartRoot = document; // ищем по всей странице
       const items = collectCartItems(cartRoot);
-      if (items.length === 0) return;
+      if (items.length === 0) {
+        setStatus(`Лавка-ккал: товаров не найдено (${CONFIG.itemSelector.slice(0, 40)}…)`);
+        return;
+      }
 
       // простой debounce: пересчитываем только если корзина изменилась
       const hash = items.map((i) => i.name + '|' + i.qty).join(';');
@@ -308,11 +328,13 @@
         .find((el) => el.children.length < 8 && /итого/i.test(el.textContent) && el.getBoundingClientRect().width < 500);
       const widget = ensureWidget(summaryEl ? summaryEl.parentElement : document.body);
       renderWidget(widget, knownCount > 0 ? total : null, knownCount, items.length, details);
+      setStatus(`Лавка-ккал: товаров ${items.length}, ккал посчитано для ${knownCount}${summaryEl ? '' : ' (блок «Итого» не найден — виджет в углу страницы)'}`);
     } finally {
       running = false;
     }
   }
 
   setInterval(tick, CONFIG.pollIntervalMs);
+  setStatus('Лавка-ккал: скрипт запущен, сканирую страницу…');
   tick();
 })();
