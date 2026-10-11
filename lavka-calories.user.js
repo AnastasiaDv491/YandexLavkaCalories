@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.18 (MVP)
+// @version      0.19 (MVP)
 // @description  Показывает суммарные ккал товаров корзины: КБЖУ берутся из карточек самой Яндекс Лавки (страницы /good/<id>), при отсутствии — из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -641,12 +641,16 @@
   }
 
   // Глубокий обход: обычный DOM + shadow DOM (Лавка может рендерить корзину в теневом дереве)
+  // v0.19: плюс same-origin iframe — корзина рендерится внутри фрейма Лавки.
   function deepQueryAll(root, selector, acc) {
     acc = acc || [];
     try { root.querySelectorAll(selector).forEach((el) => acc.push(el)); } catch (e) { /* ignore */ }
     try {
       root.querySelectorAll('*').forEach((el) => {
         if (el.shadowRoot) deepQueryAll(el.shadowRoot, selector, acc);
+        if (el.tagName === 'IFRAME') {
+          try { if (el.contentDocument) deepQueryAll(el.contentDocument, selector, acc); } catch (e) { /* cross-origin */ }
+        }
       });
     } catch (e) { /* ignore */ }
     return acc;
@@ -739,6 +743,11 @@
   // min-width:0 и clamp-типографикой, из-за чего текст налезал друг на друга.
   // v0.18: виджет живёт в собственном fixed-хосте вне DOM Лавки и изолирован shadow DOM —
 // стили/перерисовки SPA больше не могут его «сжать» или удалить.
+// v0.19: причина «пропадания» — хост крепился к document.body, а корзина Лавки
+  // рендерится ВНУТРИ iframe (debug JSON это подтвердил: кнопка диагностики нашлась
+  // внутри фрейма /cart). В родительском окне body пересоздаётся SPA — и виджет
+  // исчезал через секунду. Теперь скрипт сам находит лавковский iframe и вешает
+  // хост на его body; если корзины во фреймах нет — ставим на текущий документ.
 const HOST_CSS = [
     'position:fixed !important',
     'bottom:40px !important',
@@ -748,27 +757,44 @@ const HOST_CSS = [
     'pointer-events:auto !important',
 ].join(';');
 
-  function ensureHost() {
-    let host = document.getElementById('lavka-kcal-host');
+  // Найти документ, где реально лежит корзина: свой документ или same-origin iframe.
+  function findCartDocument() {
+    const hasCartHere =
+      document.querySelectorAll('[data-testid^="cart_item_"]').length > 0 ||
+      document.querySelectorAll('a[href*="/good/"]').length > 0;
+    if (hasCartHere) return document;
+    for (const f of Array.from(document.querySelectorAll('iframe'))) {
+      try {
+        const d = f.contentDocument;
+        if (d && d.body && d.querySelectorAll('[data-testid^="cart_item_"], a[href*="/good/"]').length > 0) {
+          return d;
+        }
+      } catch (e) { /* cross-origin — недоступен */ }
+    }
+    return document;
+  }
+
+  function ensureHost(doc) {
+    let host = doc.getElementById('lavka-kcal-host');
     if (!host || !host.isConnected) {
       host && host.remove();
-      host = document.createElement('div');
+      host = doc.createElement('div');
       host.id = 'lavka-kcal-host';
       host.setAttribute('style', HOST_CSS);
-      (document.body || document.documentElement).appendChild(host);
+      (doc.body || doc.documentElement).appendChild(host);
     }
     return host;
   }
 
-  function ensureShadow(host) {
+  function ensureShadow(doc, host) {
     let root = host.__kcalShadow;
     if (!root || !host.shadowRoot) {
       root = host.attachShadow({ mode: 'open' });
-      const style = document.createElement('style');
+      const style = doc.createElement('style');
       style.textContent = [
         ':host{all:initial;display:block}',
         '*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif}',
-        '.card{background:#f5f5ff;border:1px solid #d0d0f0;border-radius:12px;padding:10px 14px;color:#222;font-size:14px;line-height:1.45;text-align:left;box-shadow:0 2px 10px rgba(0,0,0,.12)}',
+        '.card{background:#fffdf5;border:1px solid #e5d9b8;border-radius:12px;padding:10px 14px;color:#222;font-size:14px;line-height:1.45;text-align:left;box-shadow:0 2px 10px rgba(0,0,0,.15)}',
         '.head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px 8px}',
         '.head strong{font-weight:600;font-size:15px;color:#222}',
         '.head span{color:#888;font-size:12px}',
@@ -777,7 +803,7 @@ const HOST_CSS = [
         '.row{font-size:12px;color:#555;line-height:1.4;margin-top:2px;word-break:break-word}',
       ].join('\n');
       root.appendChild(style);
-      const card = document.createElement('div');
+      const card = doc.createElement('div');
       card.className = 'card';
       root.appendChild(card);
       host.__kcalShadow = root;
@@ -787,8 +813,9 @@ const HOST_CSS = [
   }
 
   function renderWidget(total, knownCount, totalCount, details) {
-    const host = ensureHost();
-    const root = ensureShadow(host);
+    const doc = findCartDocument();
+    const host = ensureHost(doc);
+    const root = ensureShadow(doc, host);
     const card = host.__kcalCard;
     if (totalCount === 0) { card.style.display = 'none'; return; }
     card.style.display = 'block';
@@ -814,15 +841,18 @@ const HOST_CSS = [
   // Если через ~10 сек индикатора нет — Tampermonkey не запускает скрипт на этом сайте.
   let statusEl = null;
   function setStatus(text) {
+    if (statusEl && !statusEl.isConnected) statusEl = null; // SPA удалил — пересоздадим
     if (!statusEl) {
-      statusEl = document.createElement('div');
+      const doc = findCartDocument();
+      if (!(doc.body || doc.documentElement)) return;
+      statusEl = doc.createElement('div');
       statusEl.id = 'lavka-kcal-status';
       Object.assign(statusEl.style, {
-        position: 'fixed', bottom: '8px', right: '8px', zIndex: 999998,
+        position: 'fixed', bottom: '8px', right: '8px', zIndex: '999998',
         background: '#222', color: '#fafafa', padding: '6px 10px',
         borderRadius: '8px', font: '12px sans-serif', opacity: '0.85',
       });
-      document.body.appendChild(statusEl);
+      (doc.body || doc.documentElement).appendChild(statusEl);
     }
     statusEl.textContent = text;
   }
@@ -832,9 +862,9 @@ const HOST_CSS = [
   // а goodLinks > 0 — корзина лежит во фрейме/окне, куда userscript не дотягивается.
   let diagLogged = false;
   function diagOnce(hasWidget) {
-    const nTestId = document.querySelectorAll('[data-testid^="cart_item_"]').length;
-    const nListItem = document.querySelectorAll('[class*="ProductListItem"]').length;
-    const nGoodLink = document.querySelectorAll('a[href*="/good/"]').length;
+    const nTestId = deepQueryAll(document, '[data-testid^="cart_item_"]').length;
+    const nListItem = deepQueryAll(document, '[class*="ProductListItem"]').length;
+    const nGoodLink = deepQueryAll(document, 'a[href*="/good/"]').length;
     const hasBasketWords = /корзина|итого/i.test(document.body ? document.body.textContent : '');
     const info = { url: location.href, cartItemTestids: nTestId, productListItems: nListItem, goodLinks: nGoodLink, basketWordsOnPage: hasBasketWords };
     if (!diagLogged) {
@@ -849,7 +879,9 @@ const HOST_CSS = [
     if (running) return;
     running = true;
     try {
-      const cartRoot = document; // ищем по всей странице
+      // v0.19: корзина может лежать в same-origin iframe — deepQueryAll внутри
+      // collectCartItems теперь заглядывает и туда.
+      const cartRoot = document;
       let items;
       try {
         items = collectCartItems(cartRoot);
@@ -863,7 +895,7 @@ const HOST_CSS = [
         // базовые селекторы. ВАЖНО (v0.13): если уже есть готовый виджет с результатом,
         // НЕ затираем его статусом «не найдено» — в SPA Лавки корзина монтируется/размонтируется
         // при переходах, и пустой tick сбрасывал бы показанный итог ккал.
-        const host = document.getElementById('lavka-kcal-host');
+        const host = findCartDocument().getElementById('lavka-kcal-host');
         const hasWidget = !!(host && host.shadowRoot && host.__kcalCard && host.__kcalCard.style.display !== 'none' && host.__kcalCard.innerHTML);
         diagOnce(hasWidget);
         return;
@@ -902,7 +934,7 @@ const HOST_CSS = [
       // v0.18: виджет всегда в собственном fixed-хосте (справа внизу) — SPA Лавки
       // больше не может его удалить/сжать при перерисовке корзины.
       renderWidget(knownCount > 0 ? total : null, knownCount, items.length, details);
-      setStatus(`Лавка-ккал: v0.18 | товаров ${items.length}, ккал посчитано для ${knownCount}`);
+      setStatus(`Лавка-ккал: v0.19 | товаров ${items.length}, ккал посчитано для ${knownCount}`);
     } finally {
       running = false;
     }
@@ -927,6 +959,6 @@ const HOST_CSS = [
   }
 
   setInterval(safeTick, CONFIG.pollIntervalMs);
-  setStatus('Лавка-ккал: v0.13 запущен, сканирую страницу…');
+  setStatus('Лавка-ккал: v0.19 запущен, сканирую страницу…');
   safeTick();
 })();

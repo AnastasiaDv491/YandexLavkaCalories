@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Лавка — Диагностика v3 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      1.4.0
+// @version      1.5.0
 // @description  Кнопка «Диагностика»: сканирует ТУТ ЖЕ документ (и shadow DOM) на наличие товаров корзины; работает во всех фреймах и iframe Лавки
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
