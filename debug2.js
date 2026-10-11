@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Лавка — Диагностика v2 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.2.0
-// @description  Собирает карту фреймов страницы и все data-qa/data-auto атрибуты, включая iframe
+// @version      0.3.0
+// @description  Собирает карту фреймов, data-qa/data-auto атрибуты и ссылки на товары (включая iframe/shadow DOM)
 // @author       AnastasiaDv491
 // @match        https://lavka.yandex.ru/*
 // @match        https://yandex.ru/lavka/*
@@ -39,10 +39,41 @@
     return attrs;
   }
 
+  // Рекурсивно обходим shadow DOM в поиске нужных элементов
+  function deepQueryAll(root, selector, acc) {
+    acc = acc || [];
+    try {
+      root.querySelectorAll(selector).forEach((el) => acc.push(el));
+    } catch (e) { /* ignore */ }
+    try {
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot) deepQueryAll(el.shadowRoot, selector, acc);
+      });
+    } catch (e) { /* ignore */ }
+    return acc;
+  }
+
+  function collectProductLinks(doc) {
+    const links = deepQueryAll(doc, 'a[href*="/product/"]').slice(0, 15);
+    return links.map((a) => ({
+      href: (a.getAttribute('href') || '').slice(0, 120),
+      text: (a.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+      parentChain: (() => {
+        const chain = [];
+        let p = a.parentElement;
+        for (let i = 0; p && i < 4; i++) {
+          chain.push(p.tagName.toLowerCase() + (p.className && typeof p.className === 'string' ? '.' + p.className.trim().split(/\s+/).slice(0, 2).join('.') : ''));
+          p = p.parentElement;
+        }
+        return chain.join(' < ');
+      })(),
+    }));
+  }
+
   function report() {
     const frames = [];
     // верхний документ
-    frames.push({ url: location.href, sameOrigin: true, attrKeys: Object.keys(collectAttrs(document)).length, attrs: collectAttrs(document) });
+    frames.push({ url: location.href, sameOrigin: true, attrKeys: Object.keys(collectAttrs(document)).length, attrs: collectAttrs(document), productLinks: collectProductLinks(document) });
 
     // все iframe на странице
     document.querySelectorAll('iframe').forEach((f, i) => {
@@ -55,6 +86,7 @@
           const attrs = collectAttrs(d);
           info.attrKeys = Object.keys(attrs).length;
           info.attrs = attrs;
+          info.productLinks = collectProductLinks(d);
           info.bodyTextSample = (d.body ? d.body.textContent : '').replace(/\s+/g, ' ').slice(0, 300);
         }
       } catch (e) {

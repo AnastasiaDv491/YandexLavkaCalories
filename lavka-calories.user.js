@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.1.0 (MVP)
+// @version      0.2.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        https://lavka.yandex.ru/*
@@ -23,12 +23,14 @@
   const CONFIG = {
     //Selectors для парсинга DOM. Лавка меняет классы — при необходимости
     //подправьте под актуальную верстку (см. README → «Как подобрать селекторы»).
-    itemSelector: '[data-qa="basket-item"], [data-auto="basketItem"], li[class*="basket"] [class*="item"]',
-    nameSelector: '[data-auto="productCardTitle"], [class*="productName"], [class*="ProductCard_title"], h3, h4',
+    //Селекторы-эвристики используются только если data-атрибуты не нашли товары.
+    itemSelector: '[data-qa="basket-item"], [data-auto="basketItem"], [data-qa^="product-card"], [data-auto^="productCard"]',
+    fallbackItemSelector: 'a[href*="/product/"]',   // карточка товара = ссылка на страницу товара
+    nameSelector: '[data-auto="productCardTitle"], [data-qa="product-name"], [class*="productName"], [class*="ProductCard_title"], h3, h4',
     qtySelector: '[data-auto="quantityControl"], [class*="quantity"], [class*="counter"]',
     priceSelector: '[class*="price" i]',
 
-    pollIntervalMs: 2000,     // как часто пересканировать корзину
+    pollIntervalMs: 1500,     // как часто пересканировать корзину
     cacheTtlDays: 30,         // срок жизни кэша калорийности
     maxPerItemKcal: 5000,     // защита от абсурдных значений
   };
@@ -218,22 +220,60 @@
     return 1;
   }
 
+  // Эвристика для названий: не «заголовки-меню», а похожи на товар
+  const BAD_NAME_RE = /^(корзина|оформить|итого|доставка|товары|еще|ёще|показать|купить|в корзину|лавка|каталог|избранное)$/i;
+
+  function isPlausibleName(name) {
+    return name && name.length >= 3 && !BAD_NAME_RE.test(name);
+  }
+
+  function itemFromNode(node, name) {
+    return {
+      el: node,
+      name,
+      barcode: findBarcodeInNode(node),
+      weightG: extractWeightGrams(node.textContent),
+      qty: parseQuantity(node),
+    };
+  }
+
+  function dedupeByElement(items) {
+    const seen = new Set();
+    const out = [];
+    for (const it of items) {
+      // если элемент уже есть или вложен в уже взятый — пропускаем
+      let dup = false;
+      for (const s of seen) {
+        if (s === it.el || s.contains(it.el) || it.el.contains(s)) { dup = true; break; }
+      }
+      if (dup) continue;
+      seen.add(it.el);
+      out.push(it);
+    }
+    return out;
+  }
+
   function collectCartItems(root) {
-    const nodes = root.querySelectorAll(CONFIG.itemSelector);
-    const items = [];
-    nodes.forEach((node) => {
+    // 1) основной путь — data-атрибуты карточек товаров
+    let items = [];
+    root.querySelectorAll(CONFIG.itemSelector).forEach((node) => {
       const nameEl = node.querySelector(CONFIG.nameSelector);
       const name = nameEl ? nameEl.textContent.trim() : '';
-      if (!name) return;
-      items.push({
-        el: node,
-        name,
-        barcode: findBarcodeInNode(node),
-        weightG: extractWeightGrams(node.textContent),
-        qty: parseQuantity(node),
-      });
+      if (!isPlausibleName(name)) return;
+      items.push(itemFromNode(node, name));
     });
-    return items;
+
+    // 2) фолбэк — ссылки на страницы товаров: их родитель-карточка и есть товар
+    if (items.length === 0) {
+      root.querySelectorAll(CONFIG.fallbackItemSelector).forEach((a) => {
+        const card = a.closest('li, article, [class*="card" i], [class*="Card"]') || a.parentElement || a;
+        const name = (a.textContent || '').trim().split('\n')[0].trim();
+        if (!isPlausibleName(name)) return;
+        items.push(itemFromNode(card, name));
+      });
+    }
+
+    return dedupeByElement(items);
   }
 
   /* ============================================================
@@ -300,7 +340,7 @@
       const cartRoot = document; // ищем по всей странице
       const items = collectCartItems(cartRoot);
       if (items.length === 0) {
-        setStatus(`Лавка-ккал: товаров не найдено (${CONFIG.itemSelector.slice(0, 40)}…)`);
+        setStatus('Лавка-ккал: товаров не найдено. Откройте корзину Лавки и подождите пару секунд.');
         return;
       }
 
