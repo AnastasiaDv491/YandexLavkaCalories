@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.6.0 (MVP)
+// @version      0.7.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -244,26 +244,48 @@
     return acc;
   }
 
+  // Список shadow-хостов среди предков элемента (parentElement не проходит границу shadow root)
+  function ancestorsOf(el, all) {
+    const res = [];
+    let cur = el;
+    while (cur) {
+      res.push(cur);
+      if (cur.parentElement) { cur = cur.parentElement; continue; }
+      // дошли до shadow root — прыгаем на его хост
+      const root = cur.getRootNode ? cur.getRootNode() : null;
+      cur = root && root.host ? root.host : null;
+    }
+    return res;
+  }
+
   // Карточка — это элемент с подходящим классом, НЕ содержащий другую такую же карточку
   // (иначе ProductListItem внутри Section.ProductCard съел бы все позиции корзины).
-  function isLeafCard(el) {
+  // Проверка «вложенности» идёт по deep-списку всех элементов (shadow DOM included),
+  // потому что querySelectorAll не заглядывает внутрь shadow root.
+  const CARD_RE = /ProductListItem|ProductCard|ProductSnippet/;
+  function isLeafCard(el, all) {
     const cls = (typeof el.className === 'string') ? el.className : '';
-    if (!/ProductListItem|ProductCard|ProductSnippet/.test(cls)) return false;
-    let nested = false;
-    try {
-      const inner = el.querySelectorAll('[class*="ProductListItem"], [class*="ProductCard"], [class*="ProductSnippet"]');
-      for (const c of inner) {
-        const ccls = (typeof c.className === 'string') ? c.className : '';
-        if (/ProductListItem|ProductCard|ProductSnippet/.test(ccls)) { nested = true; break; }
+    if (!CARD_RE.test(cls)) return false;
+    const anc = ancestorsOf(el, all);
+    for (const c of all) {
+      if (c === el) continue;
+      const ccls = (typeof c.className === 'string') ? c.className : '';
+      if (!CARD_RE.test(ccls)) continue;
+      // c — предок el? тогда el вложен в карточку c и сам листом не является
+      if (anc.includes(c) && c !== document.body && c !== document.documentElement) {
+        // но только если c НЕ потомок el (защита от циклов — теоретически невозможно)
+        return false;
       }
-    } catch (e) { /* ignore */ }
-    return !nested;
+    }
+    return true;
   }
 
   function collectCardItems(root) {
     // Листовые карточки ищем во всём документе: блок «Состав» может быть секцией-обёрткой,
     // а может и не находиться вовсе — фолбэк лучше, чем пустой результат.
-    const cards = deepAllElements(document).filter(isLeafCard);
+    // isLeafCard учитывает shadow DOM (querySelectorAll внутрь shadow root не заглядывает).
+    const all = deepAllElements(document);
+    const cards = all.filter((el) => isLeafCard(el, all));
     let items = [];
     for (const card of cards) {
       if (isInExcludedBlock(card)) continue;  // «похожие товары» и т.п. — не позиции корзины
@@ -273,13 +295,12 @@
     }
     items = dedupeByElement(items);
 
-    // Скоупинг: если найден блок «Состав» и в нём есть хотя бы одна из карточек,
-    // оставляем только карточки из этого блока (исключаем промо «предложили купить»).
+    // Скоупинг: если найден блок «Состав», оставляем только карточки из него
+    // (исключаем промо «предложили купить»). Сравнение — по нашему deep-списку
+    // предков, а не через Node.contains (не работает для shadow-элементов).
     const cartRoot = findCartSection(root);
     if (cartRoot !== root && items.length > 0) {
-      const scoped = items.filter((it) => {
-        try { return cartRoot.contains(it.el); } catch (e) { return true; }
-      });
+      const scoped = items.filter((it) => it.el === cartRoot || ancestorsOf(it.el, all).includes(cartRoot));
       if (scoped.length > 0) items = scoped;
     }
     return items;
@@ -357,16 +378,19 @@
   }
 
   function itemNameFromCard(card) {
-    // 1) alt картинки товара — предпочтительный источник
-    const imgs = card.querySelectorAll('img[alt]');
+    // 1) alt картинки товара — предпочтительный источник.
+    // querySelectorAll не заглядывает в shadow DOM, поэтому идем по deep-списку.
+    const all = deepAllElements(card);
     let best = '';
-    for (const img of imgs) {
-      const a = cleanName(img.alt);
+    for (const el of all) {
+      if (el.tagName !== 'IMG') continue;
+      const a = cleanName(el.getAttribute('alt') || '');
       if (isPlausibleName(a) && a.length > best.length) best = a;
     }
     if (best) return best;
     // 2) эвристика по текстовым элементам карточки (с очисткой от мягких переносов)
-    for (const el of card.querySelectorAll('span, div, a, h3, h4')) {
+    for (const el of all) {
+      if (!/^(SPAN|DIV|A|H3|H4)$/.test(el.tagName)) continue;
       const t = cleanName(el.textContent);
       if (!isPlausibleName(t)) continue;
       let childText = false;
@@ -541,7 +565,14 @@
     running = true;
     try {
       const cartRoot = document; // ищем по всей странице
-      const items = collectCartItems(cartRoot);
+      let items;
+      try {
+        items = collectCartItems(cartRoot);
+      } catch (e) {
+        setStatus('Лавка-ккал: ошибка сканирования — ' + e.message);
+        console.error('[lavka-kcal]', e);
+        return;
+      }
       if (items.length === 0) {
         setStatus('Лавка-ккал: товаров не найдено. Откройте корзину Лавки и подождите пару секунд.');
         return;

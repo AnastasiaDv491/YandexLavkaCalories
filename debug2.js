@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Лавка — Диагностика v3 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.8.0
+// @version      0.9.0
 // @description  Кнопка «Диагностика»: сканирует ТУТ ЖЕ документ (и shadow DOM) на наличие товаров корзины; работает во всех фреймах и iframe Лавки
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -82,29 +82,44 @@
   }
 
   // Гипотеза: Лавка использует нестандартные ссылки на товары (не /product/).
+  // Список shadow-хостов среди предков элемента (как в userscript v0.7)
+  function ancestorsOf(el, all) {
+    const res = [];
+    let cur = el;
+    while (cur) {
+      res.push(cur);
+      if (cur.parentElement) { cur = cur.parentElement; continue; }
+      const root = cur.getRootNode ? cur.getRootNode() : null;
+      cur = root && root.host ? root.host : null;
+    }
+    return res;
+  }
+
   // Собираем все <a> с href, содержащим "lavka" или цифры-id, и все элементы с
   // признаками карточки (изображение + текст с ₽ рядом).
   function collectCardCandidates(doc) {
     const out = [];
-    // 0) карточки Лавки по классам + alt картинок (основной путь userscript v0.6):
-    //    берём только ЛИСТОВЫЕ карточки — без вложенных таких же, чтобы секция-обёртка
-    //    ProductCard не «съедала» позиции корзины
-    deepAllElements(doc).forEach((el) => {
+    // 0) карточки Лавки по классам + alt картинок (основной путь userscript v0.7):
+    //    ЛИСТОВЫЕ карточки, с учетом shadow DOM (deep-список предков вместо querySelectorAll)
+    const CARD_RE = /ProductListItem|ProductCard|ProductSnippet/;
+    const all = deepAllElements(doc);
+    all.forEach((el) => {
       if (out.length >= 30) return;
       const cls = el.className && el.className.toString ? el.className.toString() : '';
-      if (!/ProductListItem|ProductCard|ProductSnippet/.test(cls)) return;
+      if (!CARD_RE.test(cls)) return;
+      const anc = ancestorsOf(el, all);
       let nested = false;
-      try {
-        const inner = el.querySelectorAll('[class*="ProductListItem"], [class*="ProductCard"], [class*="ProductSnippet"]');
-        for (const c of inner) {
-          const ccls = c.className && c.className.toString ? c.className.toString() : '';
-          if (/ProductListItem|ProductCard|ProductSnippet/.test(ccls)) { nested = true; break; }
-        }
-      } catch (e) { /* ignore */ }
+      for (const c of all) {
+        if (c === el) continue;
+        const ccls = c.className && c.className.toString ? c.className.toString() : '';
+        if (!CARD_RE.test(ccls)) continue;
+        if (anc.includes(c) && c !== doc.body && c !== doc.documentElement) { nested = true; break; }
+      }
       if (nested) return;
       const alts = [];
-      el.querySelectorAll('img[alt]').forEach((im) => {
-        const a = (im.alt || '').replace(/\u00ad/g, '').replace(/<notr>/gi, ' ').replace(/\s+/g, ' ').trim();
+      deepAllElements(el).forEach((im) => {
+        if (im.tagName !== 'IMG') return;
+        const a = (im.getAttribute('alt') || '').replace(/\u00ad/g, '').replace(/<notr>/gi, ' ').replace(/\s+/g, ' ').trim();
         if (a && a.length > 3) alts.push(a.slice(0, 70));
       });
       const qtyM = (el.textContent || '').match(/[×x]\s*(\d{1,3})\b|(\d{1,3})\s*шт\b/i);
@@ -123,8 +138,8 @@
     });
     // 2) элементы, у которых прямой текст похож на название товара (кириллица, без ₽),
     //    а в родителе есть картинка и цена — типичная карточка
-    const all = deepAllElements(doc);
-    for (const el of all) {
+    const allText = deepAllElements(doc);
+    for (const el of allText) {
       if (out.length >= 30) break;
       const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
       if (txt.length < 4 || txt.length > 70) continue;
