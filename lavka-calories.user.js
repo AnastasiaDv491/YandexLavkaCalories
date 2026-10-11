@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.15.0 (MVP)
-// @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
+// @version      0.16.0 (MVP)
+// @description  Показывает суммарные ккал товаров корзины: КБЖУ берутся из карточек самой Яндекс Лавки (страницы /good/<id>), при отсутствии — из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
 // @match        *://yandex.ru/lavka/*
 // @include      /^https?:\/\/.*yandex\.(ru|net)\/.*$/
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      world.openfoodfacts.org
 // @connect      ru.openfoodfacts.org
 // @run-at       document-idle
@@ -49,28 +51,46 @@
    * КЭШ (localStorage): штрихкод/название -> kcal на 100 г + вес фасовки
    * ============================================================ */
 
-  // v2: смена ключа — старые поврежденные записи (null-значения из версий до 0.14) игнорируются
-  const CACHE_KEY = 'lavka_kcal_cache_v2';
+  // v3: КЛЮЧ ИЗМЕНЁН — в v2 мог попасть битый кэш (см. ошибку «reading kcalPer100g»:
+  // записи вида {"value":{"kcalPer100g":null}} проходили проверку `if (!entry)` и
+  // затем роняли расчёт). Кроме того, сам кэш переехал в GM storage: корзина Лавки
+  // может открываться в iframe другого yandex-домена, и localStorage там изолирован.
+  const CACHE_KEY = 'lavka_kcal_cache_v3';
 
   function loadCache() {
+    let raw = null;
     try {
-      return JSON.parse(localStorage.getItem(CACHE_KEY)) || {};
+      if (typeof GM_getValue === 'function') raw = GM_getValue(CACHE_KEY, null);
+    } catch (e) { /* ignore */ }
+    if (raw == null) {
+      try { raw = localStorage.getItem(CACHE_KEY); } catch (e) { /* ignore */ }
+    }
+    try {
+      const obj = raw ? JSON.parse(raw) : null;
+      return obj && typeof obj === 'object' ? obj : {};
     } catch (e) {
       return {};
     }
   }
 
   function saveCache(cache) {
+    const json = JSON.stringify(cache);
     try {
-      localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
+      if (typeof GM_setValue === 'function') GM_setValue(CACHE_KEY, json);
+      else localStorage.setItem(CACHE_KEY, json);
     } catch (e) { /* квота — просто игнорируем */ }
   }
 
   function cacheGet(key) {
     const entry = loadCache()[key];
-    if (!entry) return undefined; // не найдено — идем в API
+    if (!entry) return undefined; // не найдено — идем за данными
     if (Date.now() - entry.ts > CONFIG.cacheTtlDays * 86400000) return undefined; // устарело
-    return entry.value; // может быть 'unknown' (маркер «нет данных») или объект
+    const v = entry.value;
+    // жёсткая защита от повреждённых записей любого вида
+    if (v !== 'unknown' && v !== null && typeof v === 'object' && typeof v.kcalPer100g !== 'number') {
+      return undefined; // переспросим данные
+    }
+    return v; // 'unknown' | null | { kcalPer100g, weightG? }
   }
 
   function cacheSet(key, value) {
@@ -178,17 +198,27 @@
 
   /**
    * Главный поиск калорийности товара.
-   * item: { name, barcode, weightG (из верстки), qty }
+   * item: { name, barcode, weightG (из верстки), qty, goodId }
+   * Иерархия источников:
+   *   1) карточка товара САМОЙ Лавки (страница /good/<id>, блок traits-list-per100g)
+   *      — там есть КБЖУ почти для каждого товара; данные парсятся из HTML страницы;
+   *   2) открытый API Open Food Facts (штрихкод -> название) — фолбэк.
    * Возвращает: { kcalTotal, source, known } | { known:false }
    */
   async function getKcal(item) {
-    const key = item.barcode ? `bc:${item.barcode}` : `nm:${item.name.toLowerCase()}`;
+    const key = item.goodId ? `good:${item.goodId}`
+              : item.barcode ? `bc:${item.barcode}`
+              : `nm:${item.name.toLowerCase()}`;
     let cached = cacheGet(key);
 
     if (cached === undefined) {
-      // нет в кэше — идем в API
-      let found = (item.barcode && await lookupByBarcode(item.barcode)) ||
-                  (await lookupByName(item.name));
+      // нет в кэше — сначала страница товара Лавки, затем OFF
+      let found = null;
+      if (item.goodId) {
+        try { found = await lookupLavkaGood(item.goodId); } catch (e) { /* ignore */ }
+      }
+      if (!found && item.barcode) found = await lookupByBarcode(item.barcode);
+      if (!found) found = await lookupByName(item.name);
       cached = found || 'unknown';
       cacheSet(key, cached);
     }
@@ -204,7 +234,87 @@
     const weightG = item.weightG || cached.weightG;
     if (!weightG) return { known: false, reason: 'no-weight' };
     const kcal = Math.round((cached.kcalPer100g * weightG * item.qty) / 100);
-    return { known: true, kcalTotal: kcal, source: item.barcode ? 'barcode' : 'name' };
+    return { known: true, kcalTotal: kcal, source: cached.source || (item.barcode ? 'barcode' : 'name') };
+  }
+
+  /* ============================================================
+   * ИСТОЧНИК №1: КБЖУ ИЗ КАРТОЧКИ ТОВАРА ЯНДЕКС ЛАВКИ
+   * Реальная верстка блока (дано пользователем):
+   *   section[data-testid="traits-block"]
+   *     dl[data-testid="traits-list-per100g"]
+   *       div.listItem > dt ("ккал") + dd[data-testid="trait-value-calories"] ("22")
+   * Запрос идет на https://lavka.yandex.ru/good/<id> с credentials — страница
+   * рендерится на сервере и содержит этот блок в HTML.
+   * ============================================================ */
+
+  function fetchHtml(url) {
+    return new Promise((resolve) => {
+      const finish = (txt) => resolve(txt || null);
+      if (typeof GM_xmlhttpRequest === 'function') {
+        try {
+          GM_xmlhttpRequest({
+            method: 'GET',
+            url,
+            timeout: 15000,
+            onload: (res) => {
+              if (res.status >= 400) return finish(null);
+              // Tampermonkey не всегда отдает set-cookie для cross-origin; но запрос
+              // с того же origin (lavka.yandex.ru) получает cookies автоматически.
+              finish(res.responseText);
+            },
+            onerror: () => finish(null),
+            ontimeout: () => finish(null),
+          });
+        } catch (e) { finish(null); }
+      } else {
+        fetch(url, { credentials: 'include' })
+          .then((r) => (r.ok ? r.text() : null))
+          .catch(() => null)
+          .then(finish);
+      }
+    });
+  }
+
+  // Парсит HTML страницы товара и возвращает { kcalPer100g, weightG } | null
+  function parseLavkaGoodHtml(html) {
+    if (!html) return null;
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    return extractNutritionFromDoc(doc);
+  }
+
+  // Работает и с живым документом, и с распарсенным HTML страницы товара
+  function extractNutritionFromDoc(doc) {
+    try {
+      const list = doc.querySelector('[data-testid="traits-list-per100g"]');
+      if (!list) return null;
+      const valEl = list.querySelector('[data-testid="trait-value-calories"]');
+      let kcal = null;
+      if (valEl) kcal = parseFloat((valEl.textContent || '').replace(',', '.').trim());
+      if (kcal == null || isNaN(kcal)) {
+        // фолбэк: пара dt "ккал" -> dd
+        const dts = list.querySelectorAll('dt');
+        for (const dt of dts) {
+          if (/^(ккал|калории)/i.test((dt.textContent || '').trim())) {
+            const dd = dt.nextElementSibling;
+            if (dd) kcal = parseFloat((dd.textContent || '').replace(',', '.').trim());
+            break;
+          }
+        }
+      }
+      if (kcal == null || isNaN(kcal) || kcal <= 0 || kcal > CONFIG.maxPerItemKcal) return null;
+      // вес фасовки со страницы товара: ищем в title/description/тексте
+      let weightG = null;
+      const wText = (doc.title || '') + ' ' + ((doc.querySelector('meta[name="description"]') || {}).content || '');
+      weightG = extractWeightGrams(wText);
+      return { kcalPer100g: kcal, weightG: weightG, source: 'lavka' };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function lookupLavkaGood(goodId) {
+    const html = await fetchHtml(`https://lavka.yandex.ru/good/${encodeURIComponent(goodId)}`);
+    return parseLavkaGoodHtml(html);
   }
 
   /* ============================================================
@@ -367,6 +477,7 @@
       items.push({
         el: card,
         key: cardKey(card),
+        goodId: cardKey(card),   // id товара Лавки — главный ключ для КБЖУ со страницы /good/<id>
         name,
         barcode: findBarcodeInNode(card),
         weightG: weightFromCard(card) || extractWeightGrams(text),
@@ -600,6 +711,7 @@
           items.push({
             el: card,
             key: cardKey(card) || ('fb:' + name),
+            goodId: cardKey(card),
             name,
             barcode: findBarcodeInNode(card),
             weightG: weightFromCard(card) || extractWeightGrams(cleanName(card.textContent)),
@@ -751,7 +863,7 @@
         .find((el) => el.children.length < 8 && /итого/i.test(el.textContent) && el.getBoundingClientRect().width < 500);
       const widget = ensureWidget(summaryEl ? summaryEl.parentElement : document.body);
       renderWidget(widget, knownCount > 0 ? total : null, knownCount, items.length, details);
-      setStatus(`Лавка-ккал: товаров ${items.length}, ккал посчитано для ${knownCount}${summaryEl ? '' : ' (блок «Итого» не найден — виджет в углу страницы)'}`);
+      setStatus(`Лавка-ккал: v0.16 | товаров ${items.length}, ккал посчитано для ${knownCount}${summaryEl ? '' : ' (блок «Итого» не найден — виджет в углу страницы)'}`);
     } finally {
       running = false;
     }
