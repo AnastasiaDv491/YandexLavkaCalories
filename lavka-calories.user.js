@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.14.0 (MVP)
+// @version      0.15.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -49,7 +49,8 @@
    * КЭШ (localStorage): штрихкод/название -> kcal на 100 г + вес фасовки
    * ============================================================ */
 
-  const CACHE_KEY = 'lavka_kcal_cache_v1';
+  // v2: смена ключа — старые поврежденные записи (null-значения из версий до 0.14) игнорируются
+  const CACHE_KEY = 'lavka_kcal_cache_v2';
 
   function loadCache() {
     try {
@@ -720,7 +721,13 @@
       if (hash === lastHtmlHash) return;
       lastHtmlHash = hash;
 
-      const results = await Promise.all(items.map(getKcal));
+      // изоляция ошибок: сбой поиска по одному товару не должен ронять весь расчёт
+      const results = await Promise.all(items.map((it) =>
+        getKcal(it).catch((e) => {
+          console.warn('[lavka-kcal] ошибка поиска для «' + it.name + '»:', e);
+          return { known: false, reason: 'error' };
+        })
+      ));
 
       // Перерисовываем виджет ТОЛЬКО если корзина всё ещё на экране: страница Лавки
       // — SPA, при переходе в каталог позиции исчезают из DOM. Раньше статус
