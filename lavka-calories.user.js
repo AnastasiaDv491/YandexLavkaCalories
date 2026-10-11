@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.7.0 (MVP)
+// @version      0.8.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -217,6 +217,11 @@
   }
 
   function parseQuantity(node) {
+    // Актуальная верстка Лавки: счетчик позиции — input[data-testid="keyboard-input"]
+    try {
+      const inp = node.querySelector('input[data-testid="keyboard-input"], [data-testid="button-counter"] input');
+      if (inp && /^\d{1,3}$/.test(inp.value.trim())) return parseInt(inp.value.trim(), 10);
+    } catch (e) { /* ignore */ }
     const qEl = node.querySelector(CONFIG.qtySelector);
     if (qEl) {
       const m = qEl.textContent.match(/(\d+)/);
@@ -245,7 +250,7 @@
   }
 
   // Список shadow-хостов среди предков элемента (parentElement не проходит границу shadow root)
-  function ancestorsOf(el, all) {
+  function ancestorsOf(el) {
     const res = [];
     let cur = el;
     while (cur) {
@@ -258,24 +263,35 @@
     return res;
   }
 
+  // Ключ карточки: id товара из data-testid="cart_item_..." или ссылки /good/<id>
+  function cardKey(card) {
+    try {
+      const tid = card.getAttribute('data-testid') || '';
+      const m1 = tid.match(/cart_item_([0-9a-f]+)/i);
+      if (m1) return m1[1];
+      const a = card.querySelector('a[href*="/good/"]');
+      if (a) {
+        const m2 = (a.getAttribute('href') || '').match(/\/good\/([0-9a-zA-Z_-]+)/);
+        if (m2) return m2[1];
+      }
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
   // Карточка — это элемент с подходящим классом, НЕ содержащий другую такую же карточку
   // (иначе ProductListItem внутри Section.ProductCard съел бы все позиции корзины).
-  // Проверка «вложенности» идёт по deep-списку всех элементов (shadow DOM included),
-  // потому что querySelectorAll не заглядывает внутрь shadow root.
+  // Вложенность проверяем по dom-порядку: в document order потомок всегда идёт после
+  // своего предка, поэтому достаточно списка ancestorsOf(предка) вместо includes(el).
   const CARD_RE = /ProductListItem|ProductCard|ProductSnippet/;
   function isLeafCard(el, all) {
     const cls = (typeof el.className === 'string') ? el.className : '';
     if (!CARD_RE.test(cls)) return false;
-    const anc = ancestorsOf(el, all);
     for (const c of all) {
       if (c === el) continue;
       const ccls = (typeof c.className === 'string') ? c.className : '';
       if (!CARD_RE.test(ccls)) continue;
-      // c — предок el? тогда el вложен в карточку c и сам листом не является
-      if (anc.includes(c) && c !== document.body && c !== document.documentElement) {
-        // но только если c НЕ потомок el (защита от циклов — теоретически невозможно)
-        return false;
-      }
+      // c — предок el? (только если c встречается раньше el в document order)
+      if (all.indexOf(c) < all.indexOf(el) && ancestorsOf(c).includes(el)) return false;
     }
     return true;
   }
@@ -283,9 +299,19 @@
   function collectCardItems(root) {
     // Листовые карточки ищем во всём документе: блок «Состав» может быть секцией-обёрткой,
     // а может и не находиться вовсе — фолбэк лучше, чем пустой результат.
-    // isLeafCard учитывает shadow DOM (querySelectorAll внутрь shadow root не заглядывает).
     const all = deepAllElements(document);
-    const cards = all.filter((el) => isLeafCard(el, all));
+    const idx = new Map();
+    all.forEach((el, i) => idx.set(el, i));
+    const cards = all.filter((el) => {
+      const cls = (typeof el.className === 'string') ? el.className : '';
+      if (!CARD_RE.test(cls)) return false;
+      // лист = нет другой карточки-предка
+      for (const a of ancestorsOf(el)) {
+        if (a !== el && a !== document.body && a !== document.documentElement &&
+            typeof a.className === 'string' && CARD_RE.test(a.className)) return false;
+      }
+      return true;
+    });
     let items = [];
     for (const card of cards) {
       if (isInExcludedBlock(card)) continue;  // «похожие товары» и т.п. — не позиции корзины
@@ -293,14 +319,14 @@
       if (!isPlausibleName(name)) continue;
       items.push(itemFromNode(card, name));
     }
-    items = dedupeByElement(items);
+    items = dedupeByNames(items);
 
     // Скоупинг: если найден блок «Состав», оставляем только карточки из него
     // (исключаем промо «предложили купить»). Сравнение — по нашему deep-списку
     // предков, а не через Node.contains (не работает для shadow-элементов).
     const cartRoot = findCartSection(root);
     if (cartRoot !== root && items.length > 0) {
-      const scoped = items.filter((it) => it.el === cartRoot || ancestorsOf(it.el, all).includes(cartRoot));
+      const scoped = items.filter((it) => it.el === cartRoot || ancestorsOf(it.el).includes(cartRoot));
       if (scoped.length > 0) items = scoped;
     }
     return items;
@@ -358,6 +384,7 @@
   function isPlausibleName(name) {
     if (!name || name.length < 3 || name.length > 120) return false;
     if (/^[^\p{L}]*$/u.test(name)) return false;        // без букв — не название
+    if (/^(https?|\/\/)/i.test(name)) return false;     // URL — не название
     if (/^(еще|ёще|пропустить|перейти|показать|вернуться)/i.test(name)) return false;
     if (/\d+\s*₽/.test(name)) return false;             // название с ценой — это блок целиком
     const words = name.toLowerCase().replace(/[^\p{L}\p{N}\s]+/gu, ' ').split(/\s+/).filter(Boolean);
@@ -388,6 +415,14 @@
       if (isPlausibleName(a) && a.length > best.length) best = a;
     }
     if (best) return best;
+    // 2) актуальная верстка Лавки: видимое название в h4/h3 внутри infoContent
+    try {
+      const h = card.querySelector('h4, h3');
+      if (h) {
+        const t = cleanName(h.textContent);
+        if (isPlausibleName(t)) return t;
+      }
+    } catch (e) { /* ignore */ }
     // 2) эвристика по текстовым элементам карточки (с очисткой от мягких переносов)
     for (const el of all) {
       if (!/^(SPAN|DIV|A|H3|H4)$/.test(el.tagName)) continue;
@@ -406,6 +441,7 @@
     const text = cleanName(node.textContent);
     return {
       el: node,
+      key: cardKey(node),
       name,
       barcode: findBarcodeInNode(node),
       weightG: extractWeightGrams(text),
@@ -413,17 +449,15 @@
     };
   }
 
-  function dedupeByElement(items) {
+  // Дедуп по id товара (data-testid cart_item / ссылка /good/): один и тот же товар
+  // может быть обёрнут в несколько карточек-кандидатов. Если id нет — по имени+кол-ву.
+  function dedupeByNames(items) {
     const seen = new Set();
     const out = [];
     for (const it of items) {
-      // если элемент уже есть или вложен в уже взятый — пропускаем
-      let dup = false;
-      for (const s of seen) {
-        if (s === it.el || s.contains(it.el) || it.el.contains(s)) { dup = true; break; }
-      }
-      if (dup) continue;
-      seen.add(it.el);
+      const k = it.key ? `id:${it.key}` : `nm:${it.name.toLowerCase()}|${it.qty}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
       out.push(it);
     }
     return out;
@@ -467,7 +501,7 @@
       // если название начинается не с начала текста — чистим префиксы («Коктейль ... банан»)
       items.push(itemFromNode(card, txt));
     }
-    return dedupeByElement(items);
+    return dedupeByNames(items);
   }
 
   function collectCartItems(root) {
@@ -482,7 +516,7 @@
         if (!isPlausibleName(name)) return;
         items.push(itemFromNode(node, name));
       });
-      items = dedupeByElement(items);
+      items = dedupeByNames(items);
     }
 
     // 3) фолбэк — ссылки на страницы товаров: их родитель-карточка и есть товар
@@ -500,7 +534,7 @@
       items = collectCardLikeItems(root);
     }
 
-    return dedupeByElement(items);
+    return dedupeByNames(items);
   }
 
   /* ============================================================
