@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Лавка — Диагностика v3 (временно)
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.9.0
+// @version      1.0.0
 // @description  Кнопка «Диагностика»: сканирует ТУТ ЖЕ документ (и shadow DOM) на наличие товаров корзины; работает во всех фреймах и iframe Лавки
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -99,31 +99,32 @@
   // признаками карточки (изображение + текст с ₽ рядом).
   function collectCardCandidates(doc) {
     const out = [];
-    // 0) карточки Лавки по классам + alt картинок (основной путь userscript v0.7):
-    //    ЛИСТОВЫЕ карточки, с учетом shadow DOM (deep-список предков вместо querySelectorAll)
-    const CARD_RE = /ProductListItem|ProductCard|ProductSnippet/;
-    const all = deepAllElements(doc);
-    all.forEach((el) => {
+    // 0) позиции корзины Лавки (userscript v0.9): прямой селектор по data-testid/class
+    const CART_ITEM_SELECTOR = '[data-testid^="cart_item_"], [class*="ProductListItem"]';
+    deepAllElements(doc).forEach((el) => {
       if (out.length >= 30) return;
+      let isCard = false;
+      try { isCard = el.matches && el.matches(CART_ITEM_SELECTOR); } catch (e) { /* ignore */ }
+      if (!isCard) return;
       const cls = el.className && el.className.toString ? el.className.toString() : '';
-      if (!CARD_RE.test(cls)) return;
-      const anc = ancestorsOf(el, all);
-      let nested = false;
-      for (const c of all) {
-        if (c === el) continue;
-        const ccls = c.className && c.className.toString ? c.className.toString() : '';
-        if (!CARD_RE.test(ccls)) continue;
-        if (anc.includes(c) && c !== doc.body && c !== doc.documentElement) { nested = true; break; }
-      }
-      if (nested) return;
       const alts = [];
       deepAllElements(el).forEach((im) => {
         if (im.tagName !== 'IMG') return;
-        const a = (im.getAttribute('alt') || '').replace(/\u00ad/g, '').replace(/<notr>/gi, ' ').replace(/\s+/g, ' ').trim();
+        const a = (im.getAttribute('alt') || '').replace(/\u00ad/g, '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
         if (a && a.length > 3) alts.push(a.slice(0, 70));
       });
-      const qtyM = (el.textContent || '').match(/[×x]\s*(\d{1,3})\b|(\d{1,3})\s*шт\b/i);
-      out.push({ kind: 'lavka-card', cls: cls.split(' ').slice(0, 3).join('.'), alts, qtyHint: qtyM ? (qtyM[1] || qtyM[2]) : null });
+      const link = el.querySelector ? el.querySelector('[class*="A11yText"], [role="text"]') : null;
+      const title = el.querySelector ? el.querySelector('a[href*="/good/"] [class*="A11yText"], a[href*="/good/"] [role="text"]') : null;
+      const inp = el.querySelector ? el.querySelector('input[data-testid="keyboard-input"]') : null;
+      out.push({
+        kind: 'lavka-card',
+        cls: cls.split(' ').slice(0, 3).join('.'),
+        testid: el.getAttribute('data-testid'),
+        title: title ? title.textContent.replace(/\u00ad/g, '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) : null,
+        a11yFirst: link ? link.textContent.trim().slice(0, 60) : null,
+        alts,
+        qtyInput: inp ? inp.value : null,
+      });
     });
     // 1) любые ссылки, похожие на товарные
     deepAllElements(doc).forEach((el) => {

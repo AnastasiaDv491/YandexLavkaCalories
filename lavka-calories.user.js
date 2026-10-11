@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.8.0 (MVP)
+// @version      0.9.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -99,13 +99,13 @@
   // Извлекаем вес фасовки из строки вида "350 г", "0,5 л", "1 кг"
   function extractWeightGrams(str) {
     if (!str) return null;
-    const m = String(str).replace(',', '.').match(/(\d+(?:\.\d+)?)\s*(г|грамм|kg|кг|ml|мл|л)\b/i);
+    const m = String(str).replace(/\u00a0/g, ' ').replace(',', '.').match(/(\d+(?:[.,]\d+)?)\s*(кг|kg|грамм|г|мл|ml|литр|л)(?![\p{L}])/iu);
     if (!m) return null;
     const v = parseFloat(m[1]);
     const unit = m[2].toLowerCase();
     if (unit === 'kg' || unit === 'кг') return v * 1000;
-    if (unit === 'ml') return v;      // для жидкостей ~1 г = 1 мл
-    if (unit === 'л' || unit === 'l') return v * 1000;
+    if (unit === 'ml' || unit === 'мл') return v;   // для жидкостей ~1 г = 1 мл
+    if (unit === 'л' || unit === 'литр') return v * 1000;
     return v; // г / грамм
   }
 
@@ -278,52 +278,82 @@
     return null;
   }
 
-  // Карточка — это элемент с подходящим классом, НЕ содержащий другую такую же карточку
-  // (иначе ProductListItem внутри Section.ProductCard съел бы все позиции корзины).
-  // Вложенность проверяем по dom-порядку: в document order потомок всегда идёт после
-  // своего предка, поэтому достаточно списка ancestorsOf(предка) вместо includes(el).
-  const CARD_RE = /ProductListItem|ProductCard|ProductSnippet/;
-  function isLeafCard(el, all) {
-    const cls = (typeof el.className === 'string') ? el.className : '';
-    if (!CARD_RE.test(cls)) return false;
-    for (const c of all) {
-      if (c === el) continue;
-      const ccls = (typeof c.className === 'string') ? c.className : '';
-      if (!CARD_RE.test(ccls)) continue;
-      // c — предок el? (только если c встречается раньше el в document order)
-      if (all.indexOf(c) < all.indexOf(el) && ancestorsOf(c).includes(el)) return false;
-    }
-    return true;
+  // Реальная верстка корзины Лавки (проверено на outerHTML позиции):
+  //   div.ProductListItem[data-testid="cart_item_<id>"]     — позиция корзины
+  //     a[href="/good/<id>"]                                — ссылка на товар
+  //       span.linkContent.A11yText                         — ПОЛНОЕ название товара
+  //     h4 (aria-hidden)                                    — сокращенное (clamp) название
+  //     img[alt]                                            — полное название + мусор «<notr>»
+  //     input[data-testid="keyboard-input"]                 — количество
+  //     span[data-testid="text-train-value"]                — фасовка («200 мл») и цена
+  // Поэтому главный путь — прямой селектор позиций, без эвристик с leaf-карточками.
+  const CART_ITEM_SELECTOR = '[data-testid^="cart_item_"], [class*="ProductListItem"]';
+
+  function fullTitleFromCard(card) {
+    // 1) заголовок внутри ссылки на товар — точное полное название
+    //    (важно брать a11y-span ВНУТРИ a.link, а не первый A11yText в карточке:
+    //     первым идёт span с ценой «48 ₽ вместо обычной цены 69 ₽»)
+    try {
+      const link = card.querySelector('a[href*="/good/"]');
+      const s = link ? link.querySelector('[class*="A11yText"], [role="text"]') : null;
+      if (s) {
+        const t = cleanName(s.textContent);
+        if (isPlausibleName(t)) return t;
+      }
+    } catch (e) { /* ignore */ }
+    // 2) alt картинки товара
+    try {
+      const img = card.querySelector('img');
+      if (img) {
+        const t = cleanName(img.getAttribute('alt') || '');
+        if (isPlausibleName(t)) return t;
+      }
+    } catch (e) { /* ignore */ }
+    // 3) видимый h4/h3 (может быть обрезан «…» — лучше, чем ничего)
+    try {
+      const h = card.querySelector('h4, h3');
+      if (h) {
+        const t = cleanName(h.textContent);
+        if (isPlausibleName(t)) return t;
+      }
+    } catch (e) { /* ignore */ }
+    return '';
+  }
+
+  function weightFromCard(card) {
+    // Фасовка — отдельный элемент text-train со значением «200 мл» / «150 г».
+    // Берем ТОЛЬКО значения text-train, чтобы не схватить цену («48 ₽ вместо…»).
+    try {
+      const vals = card.querySelectorAll('[data-testid="text-train-value"]');
+      for (const v of vals) {
+        const g = extractWeightGrams(cleanName(v.textContent));
+        if (g) return g;
+      }
+    } catch (e) { /* ignore */ }
+    // фолбэк: весь текст карточки (но там есть цены — extractWeightGrams их игнорирует)
+    return extractWeightGrams(cleanName(card.textContent));
   }
 
   function collectCardItems(root) {
-    // Листовые карточки ищем во всём документе: блок «Состав» может быть секцией-обёрткой,
-    // а может и не находиться вовсе — фолбэк лучше, чем пустой результат.
-    const all = deepAllElements(document);
-    const idx = new Map();
-    all.forEach((el, i) => idx.set(el, i));
-    const cards = all.filter((el) => {
-      const cls = (typeof el.className === 'string') ? el.className : '';
-      if (!CARD_RE.test(cls)) return false;
-      // лист = нет другой карточки-предка
-      for (const a of ancestorsOf(el)) {
-        if (a !== el && a !== document.body && a !== document.documentElement &&
-            typeof a.className === 'string' && CARD_RE.test(a.className)) return false;
-      }
-      return true;
-    });
+    const nodes = deepQueryAll(root, CART_ITEM_SELECTOR);
     let items = [];
-    for (const card of cards) {
+    for (const card of nodes) {
       if (isInExcludedBlock(card)) continue;  // «похожие товары» и т.п. — не позиции корзины
-      const name = itemNameFromCard(card);
+      const name = fullTitleFromCard(card);
       if (!isPlausibleName(name)) continue;
-      items.push(itemFromNode(card, name));
+      const text = cleanName(card.textContent);
+      items.push({
+        el: card,
+        key: cardKey(card),
+        name,
+        barcode: findBarcodeInNode(card),
+        weightG: weightFromCard(card) || extractWeightGrams(text),
+        qty: parseQuantity(card),
+      });
     }
     items = dedupeByNames(items);
 
-    // Скоупинг: если найден блок «Состав», оставляем только карточки из него
-    // (исключаем промо «предложили купить»). Сравнение — по нашему deep-списку
-    // предков, а не через Node.contains (не работает для shadow-элементов).
+    // Скоупинг: если найден заголовок блока корзины, оставляем только карточки из него
     const cartRoot = findCartSection(root);
     if (cartRoot !== root && items.length > 0) {
       const scoped = items.filter((it) => it.el === cartRoot || ancestorsOf(it.el).includes(cartRoot));
@@ -398,8 +428,9 @@
   function cleanName(s) {
     if (!s) return '';
     return String(s)
-      .replace(/<notr>/gi, ' ')
+      .replace(/<[^>]*>/g, ' ')                     // любой мусор вида «<notr>…» в alt/a11y-тексте
       .replace(/\u00ad/g, '')                       // мягкие переносы (Кок­тейль -> Коктейль)
+      .replace(/\u00a0/g, ' ')                      // неразрывные пробелы («48 ₽»)
       .replace(/\s+/g, ' ')
       .trim();
   }
