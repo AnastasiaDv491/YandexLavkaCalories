@@ -17,9 +17,10 @@ dom.window.eval(src);
 const items = dom.window.__collectCartItems(dom.window.document);
 console.log(JSON.stringify(items.map(i => ({ name: i.name, qty: i.qty, weightG: i.weightG })), null, 2));
 let fail = false;
-if (items.length !== 2) { console.error('FAIL: expected 2 cart items, got ' + items.length); fail = true; }
-if (!fail && (items[0].qty !== 1 || items[1].qty !== 2)) { console.error('FAIL: qty wrong'); fail = true; }
-if (!fail && (items[0].weightG !== 200 || items[1].weightG !== 500)) { console.error('FAIL: weight wrong'); fail = true; }
-if (!fail && !/notr/i.test(items[0].name) === false && items[0].name.includes('<notr>')) { console.error('FAIL: notr in name'); fail = true; }
+if (items.length !== 3) { console.error('FAIL: expected 3 cart items, got ' + items.length); fail = true; }
+if (!fail && (items[0].qty !== 1 || items[1].qty !== 2 || items[2].qty !== 3)) { console.error('FAIL: qty wrong'); fail = true; }
+if (!fail && (items[0].weightG !== 200 || items[1].weightG !== 500 || items[2].weightG !== 150)) { console.error('FAIL: weight wrong'); fail = true; }
+if (!fail && items.some(i => /notr/i.test(i.name))) { console.error('FAIL: notr in name'); fail = true; }
+if (!fail && !items.some(i => i.name === 'Творог мягкий 1,5% Lactica 150 г')) { console.error('FAIL: soft-hyphenated item missing'); fail = true; }
 if (fail) process.exit(1);
-console.log('PASS: 2 товара корзины, промо отброшен, qty из input, вес из text-train');
+console.log('PASS: 3 товара корзины (включая мягкие переносы), промо отброшен, qty из input, вес из text-train');

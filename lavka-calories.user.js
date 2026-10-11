@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Яндекс Лавка — Калории в корзине
 // @namespace    https://github.com/AnastasiaDv491/YandexLavkaCalories
-// @version      0.10.0 (MVP)
+// @version      0.11.0 (MVP)
 // @description  Показывает примерное количество ккал товаров корзины, считая данные из открытого API Open Food Facts
 // @author       AnastasiaDv491
 // @match        *://lavka.yandex.ru/*
@@ -335,8 +335,16 @@
   }
 
   function collectCardItems(root) {
-    const nodes = deepQueryAll(root, CART_ITEM_SELECTOR);
     let items = [];
+    // 1) ГЛАВНЫЙ путь: позиции корзины — элементы data-testid="cart_item_<id>".
+    // Это точный маркер именно корзинных позиций: промо-карточки («Предложили
+    // купить») имеют другие testid (promo_...) или не имеют их вовсе.
+    let nodes = deepQueryAll(root, '[data-testid^="cart_item_"]');
+    if (nodes.length === 0) {
+      // 2) фолбэк: все ProductListItem, но затем скоупинг блоком «Состав»,
+      // чтобы не захватить промо-лист из той же секции.
+      nodes = deepQueryAll(root, '[class*="ProductListItem"]');
+    }
     for (const card of nodes) {
       if (isInExcludedBlock(card)) continue;  // «похожие товары» и т.п. — не позиции корзины
       const name = fullTitleFromCard(card);
@@ -353,11 +361,15 @@
     }
     items = dedupeByNames(items);
 
-    // Скоупинг: если найден заголовок блока корзины, оставляем только карточки из него
-    const cartRoot = findCartSection(root);
-    if (cartRoot !== root && items.length > 0) {
-      const scoped = items.filter((it) => it.el === cartRoot || ancestorsOf(it.el).includes(cartRoot));
-      if (scoped.length > 0) items = scoped;
+    // Скоупинг: если среди карточек есть не-corzinные (фолбэк по ProductListItem),
+    // и найден заголовок блока корзины — оставляем только карточки из него.
+    if (items.some((it) => !((it.el.getAttribute && it.el.getAttribute('data-testid')) || '').startsWith('cart_item_'))) {
+      const cartRoot = findCartSection(root);
+      if (cartRoot !== root && items.length > 0) {
+        const anc = new Set(ancestorsOf(cartRoot)); // предки блока + сам блок
+        const scoped = items.filter((it) => it.el === cartRoot || ancestorsOf(it.el).some((a) => anc.has(a)));
+        if (scoped.length > 0) items = scoped;
+      }
     }
     return items;
   }
@@ -377,14 +389,23 @@
         if ((c.textContent || '').trim().length > 3) { childText = true; break; }
       }
       if (childText) continue;
-      // поднимаемся до предка, внутри которого есть карточка товара
+      // Поднимаемся до предка, внутри которого есть НЕСКОЛЬКО позиций корзины
+      // (data-testid="cart_item_" или класс ProductListItem). Важно: НЕ брать
+      // первый предок с любой CARD_SELECTOR-карточкой — у Лавки контейнер
+      // блока называется Section.ProductCard и содержит также промо («Предложили
+      // купить»), а позиции лежат глубже, в отдельном списке.
       let el = h;
-      for (let i = 0; i < 10 && el.parentElement; i++) {
+      let fallback = null;
+      for (let i = 0; i < 12 && el.parentElement; i++) {
         el = el.parentElement;
         try {
-          if (el.querySelector(CARD_SELECTOR)) return el;
+          const nItems = el.querySelectorAll('[data-testid^="cart_item_"], [class*="ProductListItem"]').length;
+          if (nItems >= 2) return el;
+          if (nItems === 1 && !fallback) fallback = el;
+          if (!fallback && el.querySelector(CART_ITEM_SELECTOR)) fallback = el;
         } catch (e) { /* ignore */ }
       }
+      if (fallback) return fallback;
     }
     return root; // фолбэк: вся страница/фрейм
   }
