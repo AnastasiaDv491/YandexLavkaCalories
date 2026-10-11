@@ -51,3 +51,24 @@ Userscript, который показывает **примерное колич�
 lavka-calories.user.js  — userscript (Tampermonkey/Violentmonkey)
 README.md               — эта инструкция
 ```
+
+## Публикация кода из песочницы ассистента на GitHub
+
+Коммит с MVP лежит в рабочей песочнице ассистента, но у ассистента нет доступа
+на push в ваш репозиторий. Самый быстрый способ выложить код:
+
+1. Откройте репозиторий `AnastasiaDv491/YandexLavkaCalories` на GitHub.
+2. Нажмите **Add file → Upload files** и загрузите два файла:
+   `lavka-calories.user.js` и `README.md` (их содержимое ассистент присылает в чат).
+3. Нажмите **Commit changes**.
+
+Альтернатива через git (если клонируете репозиторий локально):
+
+```bash
+git clone https://github.com/AnastasiaDv491/YandexLavkaCalories.git
+cd YandexLavkaCalories
+# скопируйте сюда lavka-calories.user.js и README.md из чата
+git add lavka-calories.user.js README.md
+git commit -m "MVP: userscript калорий корзины Лавки на базе Open Food Facts"
+git push
+```
